@@ -8,6 +8,8 @@ services:
       - key: SEI_BASE_URL
         value: https://opendigital.sei.com.cn/v1
       - key: SEI_MODEL
-        value: DeepSeek-V4-Flash
+        value: DeepSeek-V4.1-Flash
+      - key: SEI_FALLBACK_MODELS
+        value: Qwen3.8-27B,DeepSeek-V4-Flash,DeepSeek-V4-Pro
       - key: SEI_API_KEY
         sync: false
