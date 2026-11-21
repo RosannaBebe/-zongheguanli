@@ -444,22 +444,28 @@ function renderMeetingWorkflow() {
       : ready ? '资料已收齐，等待确认' : '收集中';
   $('resultState').textContent = title;
   $('resultState').classList.toggle('ready', ready && !next);
-  $('resultDescription').textContent = r.facts.topic || '会议信息与材料进度';
+  $('resultDescription').textContent = r.facts.topic || '新会议';
   $('resultPlaceholder').hidden = true;
   $('resultContent').hidden = true;
   $('resultRequest').hidden = true;
   root.hidden = false;
   root.innerHTML = `
     <section class="workflow-card">
-      <h3>会议信息收集</h3>
-      <p class="workflow-hint">资料可以按任意顺序补充。${intake.filter(step => !step.missing.length).length} / 3 项已完成。</p>
-      <ol class="meeting-step-list">${intake.map((step, index) => `<li>
+      <div class="meeting-section-head">
+        <h3>会议信息收集</h3>
+        <span class="meeting-section-meta">${intake.filter(step => !step.missing.length).length} / 3 已完成</span>
+      </div>
+      <ol class="meeting-step-list">${intake.map((step, index) => `<li title="${meetingEscape(step.requirement)}">
         <span class="meeting-step-number">${index + 1}</span><div><strong>${step.title}</strong>
-        <p>${step.requirement}</p>${step.missing.length ? `<small>待补充：${meetingEscape(step.missing.join('、'))}</small>` : ''}</div>
+        ${step.missing.length ? `<p>${meetingEscape(step.missing.join('、'))}</p>` : `<p>${meetingEscape([
+          [info.date, info.time, info.location].filter(Boolean).join(' · '),
+          `已登记 ${r.participants.length} 人`,
+          r.meal.required ? (r.meal.special_diet === '无' ? '用餐 · 无特殊要求' : '用餐 · 已登记餐饮要求') : '不用餐',
+        ][index])}</p>`}</div>
         <span class="meeting-step-status ${step.missing.length ? '' : 'done'}">${step.missing.length ? '待完成' : '已完成'}</span>
       </li>`).join('')}</ol>
-      <details class="meeting-intake-fields" ${!ready || $('meetingIntakeFields')?.open ? 'open' : ''} id="meetingIntakeFields">
-        <summary>填写或修改会议信息</summary>
+      <details class="meeting-intake-fields" ${$('meetingIntakeFields')?.open ? 'open' : ''} id="meetingIntakeFields">
+        <summary>手动填写或修改</summary><div class="meeting-intake-body">
         <div class="workflow-grid">
           <label class="workflow-field">会议主题<input id="meetingTopic" maxlength="250" value="${meetingEscape(info.topic)}"></label>
           <label class="workflow-field">会议室<input id="meetingRoom" maxlength="250" value="${meetingEscape(info.location)}"></label>
@@ -475,11 +481,12 @@ function renderMeetingWorkflow() {
           </label>
         </div>
         ${renderMeetingAttendees(r)}
-        <div class="workflow-actions"><button type="button" class="workflow-btn" data-meeting-action="save-intake">保存会议信息</button></div>
+        <div class="workflow-actions"><button type="button" class="workflow-btn" data-meeting-action="save-intake">保存会议信息</button></div></div>
       </details>
     </section>
     <section class="workflow-card">
-      <div class="meeting-section-head"><h3>会议材料制作</h3><span role="status">${meetingEscape(title)}</span></div>
+      <div class="meeting-section-head"><h3>会议材料制作</h3>
+        <span class="meeting-section-meta">${completed.length} / ${r.meal.required === false ? 5 : 6} 已完成</span></div>
       <ol class="meeting-step-list production">${MEETING_ITEMS.map(([key, label], index) => {
         const skipped = key === 'dining_plan' && r.meal.required === false;
         const status = skipped ? '无需制作' : r.materials[key] ? '已完成'
