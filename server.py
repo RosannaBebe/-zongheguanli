@@ -432,12 +432,12 @@ class Handler(BaseHTTPRequestHandler):
             for item in meetings[:40]:
                 if not isinstance(item,dict):continue
                 source_facts=item.get("facts",{}) if isinstance(item.get("facts"),dict) else {}
-                facts={str(k):str(v)[:240] for k,v in source_facts.items() if k in {"purpose","date","time","location","attendee_count","agenda"}}
+                facts={str(k):str(v)[:240] for k,v in source_facts.items() if k in {"topic","purpose","date","time","location","attendee_count","agenda"}}
                 recent=item.get("messages",[]) if isinstance(item.get("messages"),list) else []
                 recent=[str(m)[:240] for m in recent[-8:] if isinstance(m,str)]
                 candidates.append({"id":str(item.get("id",""))[:100],"name":str(item.get("name",""))[:200],"title":str(item.get("title",""))[:200],"facts":facts,"recent_user_messages":recent})
             if not candidates or not self.active_model:return self.send_json(200,{"match_id":None,"clarify":False})
-            matcher="判断新需求是否是对已有会议的继续沟通。相同会议名称/主题/日期，即使参会人数、时间、地点等信息改变，也应匹配原会议；不得因人数变更而新建会议。若输入很笼统或无法确认是哪场会议，应要求用户从列表选择，返回clarify=true。若能确定是新会议，返回clarify=false且match_id=null。只能从候选列表中选择id，绝不编造id。只返回JSON：{\"match_id\":null或候选id,\"confidence\":0到1,\"clarify\":true或false}。候选数据："+json.dumps(candidates,ensure_ascii=False)
+            matcher="从列表中寻找可能与用户所指相符的已有会议，供用户确认。会议可能重名，优先用明确提到的日期、时间和地点区分。若用户在说另一场会议，或者没有证据指向任何已有会议，match_id 返回 null。若用户明确提到旧会议但无法区分候选，clarify 返回 true。只能使用候选列表中的 id。只返回 JSON：{\"match_id\":null或候选id,\"confidence\":0到1,\"clarify\":true或false}。候选数据："+json.dumps(candidates,ensure_ascii=False)
             answer=self.call_model([{"role":"system","content":matcher},{"role":"user","content":text}],180)
             result=parse_json_object(answer) or {}
             match_id=result.get("match_id")
@@ -445,7 +445,7 @@ class Handler(BaseHTTPRequestHandler):
             try:confidence=float(confidence)
             except (TypeError,ValueError):confidence=0
             valid_ids={x["id"] for x in candidates}
-            possible_match=match_id in valid_ids
+            possible_match=isinstance(match_id,str) and match_id in valid_ids
             if not possible_match or confidence<0.72:match_id=None
             clarify=(bool(result.get("clarify")) or (possible_match and confidence<0.72)) and match_id is None
             return self.send_json(200,{"match_id":match_id,"clarify":clarify,"confidence":confidence})

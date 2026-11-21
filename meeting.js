@@ -276,7 +276,7 @@ async function recoverSavedMeetingBasics(session) {
   const record = getMeetingRecord();
   if (record) recoverSeiTitles(session, record);
   if (!record || record.basicsRecovered || !meetingIntake(record)[0].missing.length) return;
-  const messages = session.messages.filter(message => message.role === 'user');
+  const messages = session.messages.filter(message => message.role === 'user' && !message.meetingRouting);
   if (!messages.length) return;
   try {
     const {facts} = await request('/api/meeting/recover-basics', {messages});
@@ -391,31 +391,291 @@ async function reviseMeetingMaterial(r, revision, options = {}) {
   }
 }
 
+function meetingIdentity(session) {
+  const facts = {...session.meetingFacts, ...session.meetingRecord?.facts};
+  return {...facts, topic: facts.topic || session.meetingName || ''};
+}
+
+function normalizeMeetingName(name) {
+  return String(name || '').normalize('NFKC').replace(/[\s\p{P}]/gu, '').toLowerCase();
+}
+
+function meetingScheduleDiffers(a, b) {
+  return ['date', 'time'].some(key => a[key] && b[key] && a[key] !== b[key]);
+}
+
+async function findMeetingCandidates(text, session) {
+  const current = meetingIdentity(session);
+  const normalized = normalizeMeetingName(text);
+  const refersBack = /之前|上次|刚才|原来|先前|已有|原有|之前那场|同一场|同一个会/.test(text);
+  const starting = /(?:要|想|准备|帮我|请).{0,8}(?:办|开|安排|筹备|组织|召开)|新建|再办|再开|另开|另一场/.test(text);
+  const mentionsCurrent = current.topic && normalized.includes(normalizeMeetingName(current.topic));
+  const time = meetingTimeMention(text);
+  const differentSchedule = (current.date && /\d{1,2}月\d{1,2}[日号]|\d{4}-\d{2}-\d{2}/.test(text)
+    && !meetingDateMention(text, current.date)) || (current.time && time && time !== current.time);
+  const history = readHistory().filter(item => {
+    if (item.assistant !== 'meeting' || item.meetingChoice && !meetingIdentity(item).topic) return false;
+    if (item.id === session.id) return (starting || differentSchedule) && mentionsCurrent;
+    return refersBack || !(session.distinctMeetingIds || []).includes(item.id);
+  });
+  const exact = history.filter(item => {
+    const name = normalizeMeetingName(meetingIdentity(item).topic);
+    return name.length > 1 && normalized.includes(name);
+  });
+  if (mentionsCurrent && !starting && !refersBack && !differentSchedule) {
+    // In the existing meeting, an ordinary update can still refer to it by name.
+    return exact.filter(item => normalizeMeetingName(meetingIdentity(item).topic) !== normalizeMeetingName(current.topic));
+  }
+  if (exact.length) return exact;
+
+  const otherMeetings = history.filter(item => item.id !== session.id && meetingIdentity(item).topic);
+  const firstMessage = !session.messages.some(message => message.role === 'user' && !message.meetingRouting);
+  const namedRequest = /[\p{Script=Han}A-Za-z0-9]{2,}(?:会议|交流会|座谈会|评审会|研讨会)/u.test(text);
+  if (!otherMeetings.length || (!refersBack && !(firstMessage && namedRequest))) return [];
+  try {
+    const meetings = otherMeetings.slice(0, 40).map(item => ({
+      id: item.id, name: meetingIdentity(item).topic, facts: meetingIdentity(item),
+    }));
+    const result = await request('/api/meeting/match', {text, meetings});
+    const match = otherMeetings.find(item => item.id === result.match_id);
+    if (match) {
+      const name = normalizeMeetingName(meetingIdentity(match).topic);
+      return otherMeetings.filter(item => normalizeMeetingName(meetingIdentity(item).topic) === name);
+    }
+  } catch (_) {
+    // Local names remain available when the matching service is unavailable.
+  }
+  return refersBack ? otherMeetings.slice(0, 5) : [];
+}
+
+function meetingDateMention(text, date) {
+  const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date || '');
+  if (!parts) return false;
+  return text.includes(date) || [...text.matchAll(/(?:(\d{4})年)?(\d{1,2})月(\d{1,2})[日号]/g)].some(match =>
+    (!match[1] || match[1] === parts[1]) && Number(match[2]) === Number(parts[2]) && Number(match[3]) === Number(parts[3])
+  );
+}
+
+function meetingTimeMention(text) {
+  const match = /(上午|下午|晚上|中午)?\s*(?<![\d零一二两三四五六七八九十])(\d{1,2}|[零一二两三四五六七八九十]{1,3})(?:[:：](\d{2})|点(?:([0-5]?\d)分|半)?)/.exec(text);
+  if (!match) return '';
+  let hour = Number(match[2]);
+  if (!Number.isFinite(hour)) {
+    const digits = {零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9};
+    const [tens, ones] = match[2].split('十');
+    hour = ones === undefined ? digits[tens] : (digits[tens] || 1) * 10 + (digits[ones] || 0);
+  }
+  if (!Number.isFinite(hour) || hour > 23 || Number(match[3] || match[4] || 0) > 59) return '';
+  if (['下午', '晚上'].includes(match[1]) && hour < 12) hour += 12;
+  if (match[1] === '中午' && hour < 3) hour += 12;
+  return String(hour).padStart(2, '0') + ':' + (match[0].endsWith('半') ? '30' : String(match[3] || match[4] || 0).padStart(2, '0'));
+}
+
+function meetingChoiceLabel(session) {
+  const f = meetingIdentity(session);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(f.date || '');
+  const date = match ? `${match[1]}年${Number(match[2])}月${Number(match[3])}日` : f.date || '日期待确认';
+  return `${date} ${f.time || '时间待确认'}的「${f.topic || '待命名会议'}」${f.location ? `（${f.location}）` : ''}`;
+}
+
+function meetingChoiceCandidates(session) {
+  const history = readHistory();
+  return session.meetingChoice.candidateIds.map(id => id === session.id ? session : history.find(item => item.id === id)).filter(Boolean);
+}
+
+function showMeetingChoiceActions(session) {
+  if (!session.meetingChoice) return;
+  const log = $('messages');
+  log.querySelector('.meeting-choice-actions')?.remove();
+  const candidates = meetingChoiceCandidates(session);
+  const actions = document.createElement('div');
+  actions.className = 'meeting-choice-actions';
+  actions.setAttribute('role', 'group');
+  actions.setAttribute('aria-label', '确认是否为同一场会议');
+  const button = (label, decision, description) => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'button';
+    item.textContent = label;
+    if (description) item.setAttribute('aria-label', description);
+    item.onclick = () => finishMeetingChoice(session, decision);
+    actions.append(item);
+  };
+  candidates.forEach((item, index) => button(
+    candidates.length === 1 ? '同一场，合并' : `合并至第 ${index + 1} 场`,
+    item.id, '确认合并到' + meetingChoiceLabel(item),
+  ));
+  button('新建会议', 'new');
+  button('取消', 'cancel');
+  log.append(actions);
+  log.scrollTop = log.scrollHeight;
+}
+
+function askMeetingChoice(session, text, candidates) {
+  session.meetingChoice = {text, index: session.messages.length, candidateIds: candidates.map(item => item.id)};
+  makeMessage(text, 'user', true, {meetingRouting: true});
+  const prompt = candidates.length === 1
+    ? `请您确认，您说的是${meetingChoiceLabel(candidates[0])}吗？如果是同一场，我会合并记录。如果是新会议，我会单独新建。`
+    : '我找到了几场可能相关的会议，请您确认是哪一场：\n'
+      + candidates.map((item, index) => `${index + 1}. ${meetingChoiceLabel(item)}`).join('\n')
+      + '\n如果是另一场会议，可以选择「新建会议」。';
+  makeMessage(prompt, 'assistant', true, {meetingRouting: true});
+  showMeetingChoiceActions(session);
+}
+
+function resolveMeetingChoiceText(text, candidates) {
+  const normalized = normalizeMeetingName(text);
+  if (/^(取消|先不处理|不合并也不新建)$/.test(normalized)) return 'cancel';
+  if (/(?:[？?]|吗)\s*$/.test(text) || /^(是不是|请问|如果|可能|应该是|我不确定|不确定|还没确定)/.test(normalized)) return '';
+  if (/^(都不是|这几场都不是|新建|新会议|新建会议|新建一场|另开一场)$/.test(normalized)
+    || /^(?:不是同一场|不是同一个会|不是|不合并)?(?:这是一场|这是|是|我要|请|帮我)?(?:一场|一个)?(?:新会议|新的会|新的一场|同名的新会议|另一场|另一个会|另开|新建|重新建)/.test(normalized)) return 'new';
+  if (/^(不是|不对|不要|不合并|不确认|还没确定|不确定|我不确定)/.test(normalized)) return '';
+  const selection = /^(?:是|选|选择|确认|合并至|合并到|确认合并到)?第(?:\s*)(\d+|[一二三四五六七八九十])[场个项]$/.exec(normalized);
+  if (selection) {
+    const index = Number(selection[1]) || '一二三四五六七八九十'.indexOf(selection[1]) + 1;
+    return candidates[index - 1]?.id || '';
+  }
+  const dateSpecified = /\d{1,2}月\d{1,2}[日号]|\d{4}-\d{2}-\d{2}/.test(text);
+  const time = meetingTimeMention(text);
+  if (dateSpecified || time) {
+    const selection = /^(是|对|选|确认|合并)|(?:那场|这场)(?:会|会议)?$/.test(normalized);
+    const scheduleOnly = /^(?:\d{4}年)?[\d月日号:：\-上午下午晚上中午点半分零一二两三四五六七八九十\s]+$/.test(text.trim());
+    if (!selection && !scheduleOnly) return '';
+    const matches = candidates.filter(item => {
+      const facts = meetingIdentity(item);
+      return (!dateSpecified || meetingDateMention(text, facts.date)) && (!time || time === facts.time);
+    });
+    if (matches.length === 1) return matches[0].id;
+    return '';
+  }
+  if (candidates.length === 1 && /^(是|是的|对|对的|没错|嗯|确认|同一个|同一个会|是同一个|是同一个会|同一场|是同一场|是这场|就是这场|就是那场|合并|确认合并|是的合并|同一场合并)$/.test(normalized)) {
+    return candidates[0].id;
+  }
+  return '';
+}
+
+function mergeMeetingProfiles(target, source) {
+  const donor = source.meetingRecord;
+  if (!donor) return;
+  const record = target.meetingRecord ??= {
+    facts: {...target.meetingFacts}, participants: [], meal: {required: null, special_diet: ''},
+    materials: {}, production: {started: false, asked: false, tentAsked: false, notes: {}, references: {}},
+  };
+  const before = JSON.stringify([record.facts, record.participants, record.meal]);
+  for (const [key, value] of Object.entries(donor.facts)) {
+    if (record.facts[key] == null || record.facts[key] === '') record.facts[key] = value;
+  }
+  for (const person of donor.participants) {
+    const existing = record.participants.find(item => item.type === person.type
+      && normalizeMeetingName(item.name) === normalizeMeetingName(person.name)
+      && (item.company === person.company || !item.company || !person.company));
+    if (!existing) record.participants.push(person);
+    else for (const key of ['company', 'title', 'title_source', 'english_name']) {
+      if (!existing[key] && person[key]) existing[key] = person[key];
+    }
+  }
+  if (record.facts.no_external_attendees === true && record.participants.some(person => person.type === 'visitor')) {
+    record.facts.no_external_attendees = false;
+  }
+  if (record.meal.required === null) record.meal = {...donor.meal};
+  else if (record.meal.required === true && donor.meal.required === true && !record.meal.special_diet) {
+    record.meal.special_diet = donor.meal.special_diet;
+  }
+  record.mockSteps = [...new Set([...(record.mockSteps || []), ...(donor.mockSteps || [])])];
+  if (record.production && record.materials) changedMeetingFacts(record, before);
+  target.meetingFacts = {...record.facts};
+  target.meetingName = record.facts.topic || target.meetingName;
+}
+
+async function finishMeetingChoice(source, decision) {
+  if (active !== source || !source.meetingChoice || busy || intakeDraft || editingMeetingMaterial) return;
+  const choice = source.meetingChoice;
+  const selected = meetingChoiceCandidates(source).find(item => item.id === decision);
+  if (decision !== 'new' && decision !== 'cancel' && !selected) {
+    makeMessage('这场会议已不在列表中。您可以选择其他候选会议，或新建一场。', 'assistant', true, {meetingRouting: true});
+    showMeetingChoiceActions(source);
+    return;
+  }
+  const log = $('messages');
+  if (decision === 'cancel') {
+    delete source.meetingChoice;
+    log.querySelector('.meeting-choice-actions')?.remove();
+    makeMessage('已取消本次匹配，您可以继续当前会话。', 'assistant', true, {meetingRouting: true});
+    return;
+  }
+  const history = readHistory();
+  const previous = {...source, messages: source.messages.filter((item, index) => index < choice.index || !item.meetingRouting)};
+  delete previous.meetingChoice;
+  const sourceFacts = meetingIdentity(previous);
+  const sourceIsDraft = !sourceFacts.topic;
+  const sameRecord = selected?.id === source.id;
+  const matchesRecord = selected && (sourceIsDraft
+    || normalizeMeetingName(sourceFacts.topic) === normalizeMeetingName(meetingIdentity(selected).topic))
+    && !meetingScheduleDiffers(sourceFacts, meetingIdentity(selected));
+  const reusedDraft = decision === 'new' && sourceIsDraft;
+  let target = sameRecord || reusedDraft ? previous : selected || null;
+  if (selected && !sameRecord) {
+    target = structuredClone(selected);
+    if (matchesRecord) {
+      target.messages = [...target.messages, ...previous.messages.filter(item => !item.meetingRouting && !item.failed)]
+        .sort((a, b) => String(a.at || '').localeCompare(String(b.at || '')));
+      mergeMeetingProfiles(target, previous);
+    }
+  }
+  if (target && decision === 'new') target.distinctMeetingIds = choice.candidateIds;
+  const keepSource = !sameRecord && !reusedDraft && !matchesRecord;
+  const updated = history.filter(item => item.id !== source.id && item.id !== target?.id);
+  if (keepSource) updated.unshift(previous);
+  if (target) updated.unshift(target);
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(updated.slice(0, 200)));
+  } catch (_) {
+    makeMessage('暂未保存会议记录，请您稍后重试。', 'assistant', true, {meetingRouting: true});
+    showMeetingChoiceActions(source);
+    return;
+  }
+  startSession('meeting', '', target, {
+    silent: true,
+    homeHandoff: matchesRecord || sameRecord || sourceIsDraft ? source.homeHandoff : '',
+  });
+  if (decision === 'new') active.distinctMeetingIds = choice.candidateIds;
+  const message = decision === 'new' ? '已新建会议，我会接着整理您刚才提供的信息。'
+    : `已确认是同一场会议，已将本次沟通接续到${meetingChoiceLabel(selected)}。`;
+  makeMessage(message, 'assistant', true, {meetingRouting: true});
+  if (selected) persistMeetingRecord(getMeetingRecord());
+  await sendMeetingMessage(choice.text, {skipMatch: true});
+}
+
 async function sendMeetingMessage(text, options = {}) {
   if (busy || editingMeetingMaterial || intakeDraft) return;
-  let session = active;
-  let r = getMeetingRecord();
+  const session = active;
+  const r = getMeetingRecord();
+  if (session.meetingChoice && !options.skipMatch) {
+    const decision = resolveMeetingChoiceText(text, meetingChoiceCandidates(session));
+    if (decision) return finishMeetingChoice(session, decision);
+    makeMessage(text, 'user', true, {meetingRouting: true});
+    makeMessage('请确认要合并到哪场会议，或选择「新建会议」。', 'assistant', true, {meetingRouting: true});
+    showMeetingChoiceActions(session);
+    return;
+  }
   retireWorkspaceRecovery();
-  const runningKey = productionRun?.key || options.runningKey || '';
-  const wasRunning = pauseMeetingRun() || Boolean(options.runningKey);
-  const priorPhase = meetingPhase(r);
   busy = true;
   $('chatSend').disabled = true;
   let resume = false;
+  let runningKey = '';
+  let wasRunning = false;
   try {
-    if (!options.skipMatch && !r.production.asked && !session.messages.some(m => m.role === 'user')) {
-      const match = await findPreviousMeeting(text);
+    if (!options.skipMatch) {
+      const candidates = await findMeetingCandidates(options.meetingMatchText || text, session);
       if (active !== session) return;
-      if (match?.conversation && match.conversation.id !== session.id) {
-        startSession('meeting', '', match.conversation, {homeHandoff: session.homeHandoff});
-        session = active;
-        r = getMeetingRecord();
-      } else if (match?.clarify) {
-        pendingMeetingRequest = text;
-        makeMessage('我查到几条可能相关的会议。请从左侧选择已有会议，或点击“新建会议”继续。', 'assistant', false);
+      if (candidates.length) {
+        askMeetingChoice(session, text, candidates);
         return;
       }
     }
+    runningKey = productionRun?.key || options.runningKey || '';
+    wasRunning = pauseMeetingRun() || Boolean(options.runningKey);
+    const priorPhase = meetingPhase(r);
     if (!options.replay) {
       makeMessage(text, 'user');
       if (wasRunning) makeMessage('已暂停制作，我先处理您刚补充的意见。', 'assistant');
