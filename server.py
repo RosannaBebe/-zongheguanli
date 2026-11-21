@@ -22,8 +22,9 @@ API_KEY=os.getenv("SEI_API_KEY","")
 PORT=int(os.getenv("PORT","8765"))
 ASSISTANTS={"meeting":"会务助手","information":"政务信息助手","official_document":"公文助手","knowledge":"综合知识库"}
 BASE_PERSONA="【共同服务定位】你是国企性质工程设计院综合管理部的智能服务助手，服务对象包括院领导和各级管理人员。无论用户的身份、职务或层级，一律按服务院领导的标准对待，将每位用户都视为院领导级服务对象。具有很强的服务意识：及时回应、积极承接、主动梳理、周到跟进；始终称呼“您”，语气谦逊温和、专业稳重，严禁使用“你”或命令、敷衍、怠慢的表达。准确领会指示，主动梳理安排、提醒缺项、复核关键信息，并优先交付可直接审阅或使用的成果。保持稳重、专业、响应及时，不夸大、不谄媚、不堆砌客套话，也不替领导擅自作决定。已确认事项持续沿用，用户最新明确意见优先。不得虚构事实、制度依据、来源或已执行的现实操作。对外以亲切、稳重的工作伙伴口吻交流，不冒充现实中的真人；日常交流不使用“智能体”或“AI助手”称呼自己。用户直接询问身份或所用模型时，应坦诚说明自己的岗位角色及实际模型名称，不回避、不编造。"
+HOME_AGENT_TASK="你是综智助手首页的综合服务伙伴，先听懂用户手头的事情，再把需求交给最合适的专属助手。你可以识别会务、政务信息、公文、综合知识查询四类需求。表达要自然亲切、有耐心，不把选择专业助手的责任推给用户。需求明确时返回对应intent与一句简短自然的承接话；暂时不明确时 intent=null，先肯定用户，再依据对话只问一个最有帮助的问题。不要回复“请您选择相应助手”，不要机械罗列四个入口，不要连续抛多个问题。用户说“不知道要做什么”时，帮助其从当前工作、希望形成的结果、时间紧迫程度等角度循序梳理；可以先问眼下最想解决的一件事，不催促。结合已有对话推进，避免重复问已回答的问题。只在把握充分时路由；confidence低于0.72就继续澄清。handoff_summary只概括此次需求和已确认条件，供专属助手接续，不加入猜测。输出严格JSON：{\"intent\":\"meeting|information|official_document|knowledge|null\",\"confidence\":0到1,\"reply\":\"首页回复\",\"handoff_summary\":\"交接摘要\",\"shared_memory_patch\":{\"facts\":[],\"preferences\":[]}}。不在JSON外输出文字。"
 ASSISTANT_TASKS={
- "meeting":"你是小会，负责会务统筹，是一位细致可靠、反应周到的会议协调伙伴。服务要求：将每位用户都视为院领导级服务对象，始终称呼“您”，及时回应、主动承接、周到跟进，态度谦逊温和、认真细致。围绕单次会议协助筹备并持续更新会议资料。一次会议是一条独立记录。首先确认会议名称/主题；如果没有明确名称，先礼貌询问名称，不要立即生成正式材料。收集并维护会议目的、日期时间、地点、主办方、参会对象与人数、议程、主持人、会务分工、材料和格式要求。根据需求制作或更新会议通知、议程、参会名单、主持词、座次/签到安排、欢迎屏文案、会议纪要模板等。每次用户补充或更改信息，都要更新会议档案，并主动说明哪些已有材料需要重生成。尤其要把参会人数等变化覆盖旧值（例如8人改为10人），其余已确认信息继续沿用。用户再次提出类似会议时，优先沿用匹配的旧记录，不创建重复会议。涉及时间、人数、地点等关键信息时，主动复核；尊重用户安排，不代替用户确认或通知参会人。只在用户提供信息和档案范围内工作。回复必须是JSON对象：{\"reply\":\"面向用户的中文回复\",\"meeting\":{\"name\":\"会议名称\",\"facts\":{\"purpose\":\"\",\"date\":\"\",\"time\":\"\",\"location\":\"\",\"attendee_count\":\"\",\"attendees\":\"\",\"agenda\":\"\",\"host\":\"\",\"materials\":\"\",\"notes\":\"\"}}}。未知字段留空字符串；不要在JSON外添加文字。",
+ "meeting":"你是小会，负责会务统筹，是一位细致可靠、反应周到的会议协调伙伴。服务要求：将每位用户都视为院领导级服务对象，始终称呼“您”，及时回应、主动承接、周到跟进，态度谦逊温和、认真细致。围绕单次会议协助筹备并持续更新会议资料。一次会议是一条独立记录。首先确认会议名称/主题；如果没有明确名称，先礼貌询问名称，不要立即生成正式材料。收集并维护会议目的、日期时间、地点、主办方、参会对象与人数、议程、主持人、会务分工、材料和格式要求。根据需求制作或更新会议通知、议程、参会名单、主持词、座次/签到安排、欢迎屏文案、会议纪要模板等。每次用户补充或更改信息，都要更新会议档案，并主动说明哪些已有材料需要重生成。尤其要把参会人数等变化覆盖旧值（例如8人改为10人），其余已确认信息继续沿用。用户再次提出类似会议时，优先沿用匹配的旧记录，不创建重复会议。涉及时间、人数、地点等关键信息时，主动复核；尊重用户安排，不代替用户确认或通知参会人。只在用户提供信息和档案范围内工作。回复必须是JSON对象：{\"reply\":\"面向用户的中文回复\",\"artifact\":\"可审阅成果，没有时留空\",\"shared_memory_patch\":{\"facts\":[],\"preferences\":[]},\"meeting\":{\"name\":\"会议名称\",\"facts\":{\"purpose\":\"\",\"date\":\"\",\"time\":\"\",\"location\":\"\",\"attendee_count\":\"\",\"attendees\":\"\",\"agenda\":\"\",\"host\":\"\",\"materials\":\"\",\"notes\":\"\"}}}。未知字段留空字符串；不要在JSON外添加文字。",
  "information":"你是小闻，负责政务信息搜集与核验，表达沉稳、判断审慎、条理清楚。服务要求：将每位用户都视为院领导级服务对象，始终称呼“您”，及时回应、主动承接、周到跟进，态度谦逊温和、认真细致。帮助搜集和梳理政务要情、核验来源、提炼观点并整理专报。明确主题、时间范围、地域、受众和来源要求；区分事实、判断与建议，标注待核实内容，不编造新闻、数据或出处。",
  "official_document":"你是小文，负责公文起草与校核，做事严谨、措辞得体、善于把关细节。服务要求：将每位用户都视为院领导级服务对象，始终称呼“您”，及时回应、主动承接、周到跟进，态度谦逊温和、认真细致。协助起草、润色、校对和规范公文。先确认文种、标题、主送对象、目的、依据、关键事实和篇幅；保留用户提供的事实，不擅自杜撰政策依据或发文信息，并清楚呈现可直接使用的正文和需要确认的字段。",
  "knowledge":"你是小知，负责查阅制度、模板和历史案例，耐心细致、重视依据、善于把资料讲清楚。服务要求：将每位用户都视为院领导级服务对象，始终称呼“您”，及时回应、主动承接、周到跟进，态度谦逊温和、认真细致。帮助查找制度、模板、历史案例和会务/政务/公文材料。只依据本次对话及用户提供的知识材料回答；材料不足时明确说明并询问上传或补充资料，不虚构制度条款、来源或历史记录。"
@@ -36,6 +37,22 @@ def parse_json_object(text:str):
         value=json.loads(match.group())
         return value if isinstance(value,dict) else None
     except Exception:return None
+
+def clean_shared_memory(value):
+    if not isinstance(value,dict):return {"facts":[],"preferences":[]}
+    result={}
+    for key in ("facts","preferences"):
+        items=value.get(key,[])
+        if not isinstance(items,list):items=[]
+        cleaned=[]
+        for item in items[-20:]:
+            if isinstance(item,str) and item.strip():cleaned.append(item.strip()[:240])
+        result[key]=cleaned
+    return result
+
+def clean_memory_patch(value):
+    if not isinstance(value,dict):return {"facts":[],"preferences":[]}
+    return clean_shared_memory(value)
 
 def direct_intent(text:str)->str:
     # Explicit assistant requests and references to prior meetings route to their dedicated assistant first.
@@ -110,21 +127,44 @@ class Handler(BaseHTTPRequestHandler):
             clarify=(bool(result.get("clarify")) or (possible_match and confidence<0.72)) and match_id is None
             return self.send_json(200,{"match_id":match_id,"clarify":clarify,"confidence":confidence})
         if self.path=="/api/ai/workbench-intent":
-            text=str(data.get("text", ""))[:4000];intent=direct_intent(text)
-            if not intent and API_KEY:
-                answer=llm([{"role":"system","content":"你是综智助手的意图路由器。判断用户当前最主要的需求，只返回一个JSON对象：{\"intent\":\"meeting|information|official_document|knowledge\"}。办会、开会归meeting；政务要情、信息稿、专报归information；公文起草润色校对归official_document；查询制度模板案例或过往材料归knowledge。"},{"role":"user","content":text}],100)
-                match=re.search(r"\{.*?\}",answer,re.S)
-                if match:
-                    try:
-                        candidate=json.loads(match.group()) .get("intent","")
-                        if candidate in ASSISTANTS:intent=candidate
-                    except Exception: pass
-            return self.send_json(200,{"intent":intent})
+            text=str(data.get("text", ""))[:4000]
+            intent=direct_intent(text)
+            if intent:
+                return self.send_json(200,{"intent":intent,"confidence":1,"reply":"好的，这件事我来为您接续安排。","handoff_summary":text,"shared_memory_patch":{"facts":[],"preferences":[]}})
+            turns=data.get("messages",[])
+            if not isinstance(turns,list):turns=[]
+            clean=[]
+            for item in turns[-16:]:
+                if not isinstance(item,dict):continue
+                role=item.get("role");content=item.get("text",item.get("content",""))
+                if role in ("user","assistant") and isinstance(content,str):clean.append({"role":role,"content":content[:2500]})
+            if not clean or clean[-1].get("role")!="user" or clean[-1].get("content")!=text:
+                clean.append({"role":"user","content":text})
+            shared=clean_shared_memory(data.get("shared_memory"))
+            if not API_KEY:
+                return self.send_json(200,{"intent":"","confidence":0,"reply":"没关系，您不用先想好要找哪位助手。方便告诉我，您眼下最想解决的一件事是什么？我会陪您一起梳理。","handoff_summary":"","shared_memory_patch":{"facts":[],"preferences":[]}})
+            system=BASE_PERSONA+"\n\n首页综合助手任务："+HOME_AGENT_TASK+"\n\n用户共享记忆（仅作背景参考，以用户当前明确表达为准）："+json.dumps(shared,ensure_ascii=False)[:2500]
+            answer=llm([{"role":"system","content":system}]+clean,500)
+            result=parse_json_object(answer) or {}
+            candidate=result.get("intent")
+            try:confidence=float(result.get("confidence",0))
+            except (TypeError,ValueError):confidence=0
+            if candidate not in ASSISTANTS or confidence<0.72:candidate=""
+            reply=result.get("reply")
+            if not isinstance(reply,str) or not reply.strip():
+                reply="好的，我陪您一起梳理。您眼下最希望先解决的是什么？"
+            summary=result.get("handoff_summary","")
+            return self.send_json(200,{"intent":candidate,"confidence":confidence,"reply":reply[:2000],"handoff_summary":str(summary)[:1800],"shared_memory_patch":clean_memory_patch(result.get("shared_memory_patch"))})
         if self.path=="/api/ai/chat":
             key=data.get("assistant");messages=data.get("messages",[])
             if key not in ASSISTANTS:return self.send_json(400,{"error":"助手类型无效"})
             if not isinstance(messages,list) or not messages:return self.send_json(400,{"error":"请先输入需求"})
             system=BASE_PERSONA+"\n\n当前助手："+ASSISTANTS[key]+"。\n任务要求："+ASSISTANT_TASKS[key]
+            system+="\n\n输出要求：只输出JSON对象，字段为reply（自然、礼貌的中文回复）、artifact（可直接审阅的工作成果，没有独立成果时与reply相同）、shared_memory_patch（对象，包含facts与preferences两个字符串数组）。共享记忆只记录用户明确表达且对五位助手未来服务有复用价值的非敏感背景或偏好；不推断用户职务/身份，不记录密钥、证件、私人联系方式、完整文件内容等敏感信息。没有合适内容时数组留空。"
+            shared=clean_shared_memory(data.get("shared_memory"))
+            system+="\n\n用户共享记忆（供五位助手共同参考；最新明确表达优先）：\n"+json.dumps(shared,ensure_ascii=False)[:2500]
+            handoff=data.get("home_handoff")
+            if isinstance(handoff,str) and handoff.strip():system+="\n\n首页综合助手交接摘要（已由用户在本次沟通中提供）：\n"+handoff[:1800]
             meeting_memory=data.get("meeting_memory")
             if key=="meeting" and isinstance(meeting_memory,dict):
                 memory={"name":str(meeting_memory.get("name",""))[:200],"facts":meeting_memory.get("facts",{}) if isinstance(meeting_memory.get("facts"),dict) else {}}
@@ -145,8 +185,13 @@ class Handler(BaseHTTPRequestHandler):
                 facts={name:str(value)[:1000] for name,value in facts.items() if name in allowed and value not in (None,"")}
                 meeting_name=str(meeting.get("name", ""))[:200]
                 if not isinstance(text_reply,str) or not text_reply:text_reply=reply
-                return self.send_json(200,{"reply":text_reply,"artifact":text_reply,"meeting":{"name":meeting_name,"facts":facts}})
-            return self.send_json(200,{"reply":reply,"artifact":reply})
+                return self.send_json(200,{"reply":text_reply,"artifact":str(result.get("artifact") or text_reply)[:12000],"meeting":{"name":meeting_name,"facts":facts},"shared_memory_patch":clean_memory_patch(result.get("shared_memory_patch"))})
+            result=parse_json_object(reply) or {}
+            text_reply=result.get("reply")
+            if not isinstance(text_reply,str) or not text_reply.strip():text_reply=reply
+            artifact=result.get("artifact")
+            if not isinstance(artifact,str) or not artifact.strip():artifact=text_reply
+            return self.send_json(200,{"reply":text_reply[:12000],"artifact":artifact[:12000],"shared_memory_patch":clean_memory_patch(result.get("shared_memory_patch"))})
         return self.send_json(404,{"error":"未找到接口"})
 
 if __name__=="__main__":
