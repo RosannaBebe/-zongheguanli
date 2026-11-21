@@ -29,7 +29,7 @@ GitHub 的 `main` 保存当前部署版本。每次发布前会在 `versions/` �
 3. 创建服务并等待部署完成。Render 会提供一个 `https://…onrender.com` 地址，打开即可使用。
 4. 如之后需要更换密钥，在 Render 服务的 **Environment** 中修改 `SEI_API_KEY` 并重新部署。
 
-`SEI_BASE_URL` 和 `SEI_MODEL` 已在部署配置中设为模型服务地址和 `DeepSeek-V4-Flash`。模型密钥保存在 Render 服务端环境变量中。免费实例可能在空闲后休眠，首次访问会需要等待服务唤醒。
+`SEI_BASE_URL` 已设为您提供的服务地址，首选模型为 `DeepSeek-V4.1-Flash`。首页每次文字沟通都会请求模型判断意图和回复；识别清楚后再交给专属助手。若首选模型返回不支持或暂时不可用等服务错误，会依次尝试 `Qwen3.8-27B`、`DeepSeek-V4-Flash`、`DeepSeek-V4-Pro`。五位助手的意图判断、会话回复和会议匹配都通过同一服务端模型调用函数发送到该 API；页面不会直接携带 API Key。模型密钥保存在 Render 服务端环境变量中。免费实例可能在空闲后休眠，首次访问会需要等待服务唤醒。
 
 ## 本地运行
 
@@ -40,7 +40,8 @@ GitHub 的 `main` 保存当前部署版本。每次发布前会在 `versions/` �
 ## 环境变量
 
 - `SEI_BASE_URL`：默认 `https://opendigital.sei.com.cn/v1`
-- `SEI_MODEL`：默认 `DeepSeek-V4-Flash`
+- `SEI_MODEL`：默认 `DeepSeek-V4.1-Flash`
+- `SEI_FALLBACK_MODELS`：逗号分隔的后备模型列表
 - `SEI_API_KEY`：服务端 API Key
 - `PORT`：默认 `8765`
 
