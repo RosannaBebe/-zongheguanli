@@ -17,10 +17,9 @@ def load_dotenv():
         key,value=line.split("=",1)
         os.environ.setdefault(key.strip(),value.strip().strip("\"'"))
 load_dotenv()
-BASE_URL=os.getenv("SEI_BASE_URL","https://opendigital.sei.com.cn/v1").rstrip("/")
-MODEL=os.getenv("SEI_MODEL","DeepSeek-V4.1-Flash")
-FALLBACK_MODELS=[name.strip() for name in os.getenv("SEI_FALLBACK_MODELS","Qwen3.8-27B,DeepSeek-V4-Flash,DeepSeek-V4-Pro").split(",") if name.strip()]
-API_KEY=os.getenv("SEI_API_KEY","")
+BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
+MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-flash")
+API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 PORT=int(os.getenv("PORT","8765"))
 ASSISTANTS={"meeting":"会务助手","information":"政务信息助手","official_document":"公文助手","knowledge":"综合知识库"}
 BASE_PERSONA="【共同服务定位】你是国企性质工程设计院综合管理部的智能服务助手，服务对象包括院领导和各级管理人员。无论用户的身份、职务或层级，一律按服务院领导的标准对待，将每位用户都视为院领导级服务对象。具有很强的服务意识：及时回应、积极承接、主动梳理、周到跟进；始终称呼“您”，语气谦逊温和、专业稳重，严禁使用“你”或命令、敷衍、怠慢的表达。准确领会指示，主动梳理安排、提醒缺项、复核关键信息，并优先交付可直接审阅或使用的成果。保持稳重、专业、响应及时，不夸大、不谄媚、不堆砌客套话，也不替领导擅自作决定。已确认事项持续沿用，用户最新明确意见优先。不得虚构事实、制度依据、来源或已执行的现实操作。对外以亲切、稳重的工作伙伴口吻交流，不冒充现实中的真人；日常交流不使用“智能体”或“AI助手”称呼自己。用户直接询问身份或所用模型时，应坦诚说明自己的岗位角色及实际模型名称，不回避、不编造。"
@@ -85,29 +84,47 @@ def direct_intent(text:str)->str:
     if re.search(r"公文|通知|请示|起草|润色|校对",text): return "official_document"
     return ""
 
+class ModelServiceError(RuntimeError):
+    pass
+
+
 def llm(messages, max_tokens=1200):
-    if not API_KEY: raise RuntimeError("服务端未设置 SEI_API_KEY")
-    models=list(dict.fromkeys([MODEL]+FALLBACK_MODELS))
-    last_error="模型服务返回格式无法识别"
-    for index,model in enumerate(models):
-        request_messages=[dict(message) for message in messages]
-        if request_messages and request_messages[0].get("role")=="system":
-            request_messages[0]["content"]+="\n\n本次实际调用模型名称："+model+"。如果用户询问模型，请如实回答这个名称。"
-        payload=json.dumps({"model":model,"messages":request_messages,"temperature":0.3,"max_tokens":max_tokens}).encode()
-        req=urllib.request.Request(BASE_URL+"/chat/completions",data=payload,headers={"Authorization":"Bearer "+API_KEY,"Content-Type":"application/json"},method="POST")
-        try:
-            with urllib.request.urlopen(req,timeout=90) as response: data=json.loads(response.read().decode("utf-8"))
-            return data["choices"][0]["message"]["content"]
-        except urllib.error.HTTPError as exc:
-            detail=exc.read(1200).decode("utf-8","replace")
-            last_error="模型 %s 返回 HTTP %s：%s"%(model,exc.code,detail[:500])
-            if exc.code not in (400,404,408,422,429,500,502,503,504) or index==len(models)-1:break
-        except (KeyError,IndexError,TypeError,ValueError) as exc:
-            last_error="模型 %s 返回格式无法识别：%s"%(model,str(exc)[:180])
-            if index==len(models)-1:break
-        except Exception as exc:
-            raise RuntimeError("连接模型服务失败："+str(exc)) from None
-    raise RuntimeError(last_error)
+    if not API_KEY:
+        raise ModelServiceError("服务端未设置 DEEPSEEK_API_KEY")
+
+    request_messages = [dict(message) for message in messages]
+    if request_messages and request_messages[0].get("role") == "system":
+        request_messages[0]["content"] += (
+            "\n\n本次实际调用模型名称：" + MODEL + "。如果用户询问模型，请如实回答这个名称。"
+        )
+    payload = json.dumps({
+        "model": MODEL,
+        "messages": request_messages,
+        "temperature": 0.3,
+        "max_tokens": max_tokens,
+        "thinking": {"type": "disabled"},
+        "response_format": {"type": "json_object"},
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        BASE_URL + "/chat/completions",
+        data=payload,
+        headers={"Authorization": "Bearer " + API_KEY, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            data = json.load(response)
+        content = data["choices"][0]["message"]["content"]
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("empty content")
+        return content
+    except urllib.error.HTTPError as error:
+        raise ModelServiceError(f"DeepSeek API 返回 HTTP {error.code}") from None
+    except (OSError, TimeoutError):
+        raise ModelServiceError("无法连接 DeepSeek API") from None
+    except (KeyError, IndexError, TypeError, ValueError):
+        raise ModelServiceError("DeepSeek API 返回的回复为空或格式异常") from None
+
 
 class Handler(BaseHTTPRequestHandler):
     server_version="Zongzhi/1.0"
@@ -119,7 +136,7 @@ class Handler(BaseHTTPRequestHandler):
         if n>1_000_000: raise ValueError("请求内容过大")
         return json.loads(self.rfile.read(n) or b"{}")
     def do_GET(self):
-        if self.path=="/api/ai/status": return self.send_json(200,{"configured":bool(API_KEY),"model":MODEL,"fallback_models":FALLBACK_MODELS,"base_url":BASE_URL})
+        if self.path=="/api/ai/status": return self.send_json(200,{"configured":bool(API_KEY),"model":MODEL,"fallback_models":[],"base_url":BASE_URL})
         if self.path in ("/health","/healthz"): return self.send_json(200,{"ok":True})
         # Single-page app: all module paths serve the same front end.
         if self.path.split("?",1)[0] in ("/","/meeting","/information","/official-documents","/knowledge"):
@@ -128,6 +145,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try: data=self.read_json()
         except Exception as exc: return self.send_json(400,{"error":str(exc)})
+        if not isinstance(data, dict):
+            return self.send_json(400, {"error": "请求内容必须是 JSON 对象"})
+        try:
+            return self.handle_model_request(data)
+        except ModelServiceError as error:
+            status = 502 if API_KEY else 503
+            return self.send_json(status, {"error": str(error)})
+
+    def handle_model_request(self, data):
         if self.path=="/api/meeting/match":
             text=str(data.get("text",""))[:2000]
             meetings=data.get("meetings",[])
@@ -165,8 +191,6 @@ class Handler(BaseHTTPRequestHandler):
             if not clean or clean[-1].get("role")!="user" or clean[-1].get("content")!=text:
                 clean.append({"role":"user","content":text})
             shared=clean_shared_memory(data.get("shared_memory"))
-            if not API_KEY:
-                return self.send_json(200,{"intent":"","confidence":0,"reply":"没关系，您不用先想好要找哪位助手。方便告诉我，您眼下最想解决的一件事是什么？我会陪您一起梳理。","handoff_summary":"","shared_memory_patch":{"facts":[],"preferences":[]}})
             system=BASE_PERSONA+"\n\n首页综合助手任务："+HOME_AGENT_TASK+"\n\n用户共享记忆（仅作背景参考，以用户当前明确表达为准）："+json.dumps(shared,ensure_ascii=False)[:2500]
             answer=llm([{"role":"system","content":system}]+clean,500)
             result=parse_json_object(answer) or {}
