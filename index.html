@@ -84,13 +84,22 @@ body{min-height:100vh;background:radial-gradient(ellipse at 84% 12%,#b9e0f1 0,tr
 .workspace[data-assistant="meeting"] .workspace-head small {display:none}
 .workspace[data-assistant="meeting"] .layout {
   width:100%;max-width:none;min-height:0;height:100%;margin:0;padding:0;gap:0;
-  grid-template-columns:clamp(162px,15vw,224px) minmax(300px,1fr) minmax(370px,1.12fr);
+  --history-min:162px;
+  --chat-min:300px;
+  --results-min:370px;
+  --split-width:8px;
+  grid-template-columns:
+    var(--history-track,clamp(var(--history-min),15vw,224px))
+    var(--split-width)
+    var(--chat-track,minmax(var(--chat-min),1fr))
+    var(--split-width)
+    var(--results-track,minmax(var(--results-min),1.12fr));
 }
 .workspace[data-assistant="meeting"] :is(.agent-history,.chat,.result) {
   min-height:0;max-height:none;border:0;border-radius:0;box-shadow:none;
 }
 .workspace[data-assistant="meeting"] .agent-history {
-  padding:16px 12px;background:var(--work-sidebar);border-right:1px solid var(--work-line);
+  padding:16px 12px;background:var(--work-sidebar);
 }
 .workspace[data-assistant="meeting"] .agent-history-head {padding:2px 2px 12px;border:0}
 .workspace[data-assistant="meeting"] .agent-history-head strong {font-size:12px;color:var(--work-muted)}
@@ -123,7 +132,7 @@ body{min-height:100vh;background:radial-gradient(ellipse at 84% 12%,#b9e0f1 0,tr
 .workspace[data-assistant="meeting"] .compose-row {margin-top:3px;padding-left:6px}
 .workspace[data-assistant="meeting"] .compose-row .button {border-radius:8px;padding:6px 11px}
 
-.workspace[data-assistant="meeting"] .result {background:var(--work-panel);border-left:1px solid var(--work-line)}
+.workspace[data-assistant="meeting"] .result {background:var(--work-panel)}
 .workspace[data-assistant="meeting"] .result-head {
   min-height:69px;align-items:center;padding:13px 21px;background:#f7f9fc;border-color:var(--work-line);
 }
@@ -178,7 +187,22 @@ body{min-height:100vh;background:radial-gradient(ellipse at 84% 12%,#b9e0f1 0,tr
 .workspace[data-assistant="meeting"] .material-tab.active {background:#e0ebfb;color:#16427d;border-color:#bdd0e8}
 .workspace[data-assistant="meeting"] .material-content {background:#fff}
 .workspace[data-assistant="meeting"] .material-library {margin-top:0;padding-top:9px}
-.workspace-switch {display:none}
+ .workspace-switch,.workspace-splitter {display:none}
+.workspace[data-assistant="meeting"] .workspace-splitter {
+  position:relative;display:block;min-width:0;cursor:col-resize;touch-action:none;
+  background:#f5f7fa;outline:none;
+}
+.workspace[data-assistant="meeting"] .workspace-splitter::before {
+  content:"";position:absolute;inset:0 auto 0 50%;width:1px;background:var(--work-line);
+}
+.workspace[data-assistant="meeting"] .workspace-splitter::after {
+  content:"";position:absolute;left:50%;top:50%;width:3px;height:24px;
+  border-radius:3px;transform:translate(-50%,-50%);background:#9fb2c9;
+}
+.workspace[data-assistant="meeting"] .workspace-splitter:is(:hover,:focus-visible,.is-dragging) {background:#e1edfc}
+.workspace[data-assistant="meeting"] .workspace-splitter:is(:hover,:focus-visible,.is-dragging)::after {background:var(--work-accent)}
+body.workspace-resizing,body.workspace-resizing * {cursor:col-resize!important;user-select:none}
+
 
 @media (max-width:960px) {
   .workspace[data-assistant="meeting"] {grid-template-rows:48px 43px minmax(0,1fr)}
@@ -190,7 +214,7 @@ body{min-height:100vh;background:radial-gradient(ellipse at 84% 12%,#b9e0f1 0,tr
   }
   .workspace[data-assistant="meeting"] .workspace-switch button[aria-pressed="true"] {background:#e6effc;color:#143d73;font-weight:650}
   .workspace[data-assistant="meeting"] .layout {grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr)}
-  .workspace[data-assistant="meeting"] .layout > :is(.agent-history,.chat,.result) {display:none;border:0}
+  .workspace[data-assistant="meeting"] .layout > :is(.agent-history,.chat,.result,.workspace-splitter) {display:none;border:0}
   .workspace[data-assistant="meeting"][data-pane="history"] .agent-history,
   .workspace[data-assistant="meeting"][data-pane="chat"] .chat,
   .workspace[data-assistant="meeting"][data-pane="results"] .result {display:flex}
@@ -272,7 +296,11 @@ body.pan-active .topbar{height:60px;padding:0 clamp(12px,3vw,28px);background:#f
   <button type="button" data-pane="history" aria-pressed="false">会议</button>
   <button type="button" data-pane="chat" aria-pressed="true">对话</button>
   <button type="button" data-pane="results" aria-pressed="false">工作台</button>
-</nav><main class="layout"><aside class="agent-history"><header class="agent-history-head"><strong id="agentHistoryTitle">会议列表</strong><button class="button" id="newConversation">＋ 新建会议</button></header><div class="agent-history-list" id="agentHistoryList"></div><div class="agent-history-empty" id="agentHistoryEmpty">还没有会议记录。新建后，每次会议会作为独立记录保存在这里。</div></aside><aside class="chat"><div class="chat-head"><img class="chat-avatar" id="chatAvatar" alt=""><span><strong id="agentName">赛博小潘</strong><small id="agentTagline">您好，会议安排我来替您细细统筹。</small></span></div><div class="messages" id="messages" role="log" aria-live="polite"></div><form class="compose" id="chatForm"><textarea id="chatInput" rows="2" maxlength="4000" placeholder="请补充背景、具体要求或修改意见…" aria-label="请补充您的需求"></textarea><div class="compose-row"><small>Enter 发送 · Shift + Enter 换行</small><button class="button primary" id="chatSend">发送</button></div></form></aside><section class="result"><header class="result-head"><div><h2 id="resultTitle">工作成果</h2><p id="resultDescription">对话中的工作成果会显示在这里</p></div><span class="state" id="resultState">等待开始</span></header><div class="result-body"><div class="result-placeholder" id="resultPlaceholder"><div><b>已为您准备就绪</b><div>请说明您的需求，工作成果将在此处整理呈现</div></div></div><div class="result-content" id="resultContent"></div><div class="meeting-workflow" id="meetingWorkflow" hidden></div><div class="result-attachment" id="resultRequest" hidden><strong>当前办理事项</strong><p id="resultRequestText"></p></div></div></section></main></section>
+</nav><main class="layout" id="workspaceLayout"><aside class="agent-history" id="workspaceHistory"><header class="agent-history-head"><strong id="agentHistoryTitle">会议列表</strong><button class="button" id="newConversation">＋ 新建会议</button></header><div class="agent-history-list" id="agentHistoryList"></div><div class="agent-history-empty" id="agentHistoryEmpty">还没有会议记录。新建后，每次会议会作为独立记录保存在这里。</div></aside>
+<div class="workspace-splitter" role="separator" aria-orientation="vertical" aria-label="调整会议列表宽度" aria-controls="workspaceHistory" tabindex="0"></div>
+<aside class="chat" id="workspaceChat"><div class="chat-head"><img class="chat-avatar" id="chatAvatar" alt=""><span><strong id="agentName">赛博小潘</strong><small id="agentTagline">您好，会议安排我来替您细细统筹。</small></span></div><div class="messages" id="messages" role="log" aria-live="polite"></div><form class="compose" id="chatForm"><textarea id="chatInput" rows="2" maxlength="4000" placeholder="请补充背景、具体要求或修改意见…" aria-label="请补充您的需求"></textarea><div class="compose-row"><small>Enter 发送 · Shift + Enter 换行</small><button class="button primary" id="chatSend">发送</button></div></form></aside>
+<div class="workspace-splitter" role="separator" aria-orientation="vertical" aria-label="调整工作台宽度" aria-controls="workspaceResults" tabindex="0"></div>
+<section class="result" id="workspaceResults"><header class="result-head"><div><h2 id="resultTitle">工作成果</h2><p id="resultDescription">对话中的工作成果会显示在这里</p></div><span class="state" id="resultState">等待开始</span></header><div class="result-body"><div class="result-placeholder" id="resultPlaceholder"><div><b>已为您准备就绪</b><div>请说明您的需求，工作成果将在此处整理呈现</div></div></div><div class="result-content" id="resultContent"></div><div class="meeting-workflow" id="meetingWorkflow" hidden></div><div class="result-attachment" id="resultRequest" hidden><strong>当前办理事项</strong><p id="resultRequestText"></p></div></div></section></main></section>
 <script src="meeting.js"></script>
 <script>
 const $=id=>document.getElementById(id);const HISTORY_KEY='zongzhi.conversations.v1',SHARED_MEMORY_KEY='zongzhi.shared-memory.v1';
@@ -369,6 +397,99 @@ function restoreHomeConversation(item) {
 function saveHistory(){if(!active||(!active.messages.length&&active.assistant!=='meeting'))return;active.updatedAt=new Date().toISOString();const first=active.messages.find(m=>m.role==='user');if(first)active.title=active.assistant==='meeting'?(active.meetingName||first.text.slice(0,42)):first.text.slice(0,42);let items=readHistory().filter(x=>x.id!==active.id);items.unshift(active);try{localStorage.setItem(HISTORY_KEY,JSON.stringify(items.slice(0,200)))}catch(_){}renderAgentHistory()}
 function makeMessage(text,role='assistant',persist=true){const el=document.createElement('div');el.className='message '+role;el.textContent=text;$('messages').appendChild(el);$('messages').scrollTop=$('messages').scrollHeight;if(persist&&active){active.messages.push({role,text,at:new Date().toISOString()});saveHistory()}return el}
 function renderAgentHistory(){if(!active)return;const cfg=assistants[active.assistant],list=$('agentHistoryList');$('agentHistoryTitle').textContent=cfg.listTitle;$('newConversation').textContent=active.assistant==='meeting'?'＋ 新建会议':'＋ 新建对话';list.replaceChildren();const items=readHistory().filter(x=>x.assistant===active.assistant).sort((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt)));$('agentHistoryEmpty').hidden=!!items.length;$('agentHistoryEmpty').textContent=active.assistant==='meeting'?'暂时没有会议记录。开始沟通后，每场会议都会单独保存在这里，方便您随时接续办理。':'暂时没有此助手的历史记录。您开始沟通后，相关记录会保存在这里。';for(const item of items){const open=document.createElement('button');open.type='button';open.className='agent-history-item'+(item.id===active.id?' active':'');const title=document.createElement('strong');title.textContent=item.assistant==='meeting'?(item.meetingName||item.title||'待确认会议名称'):(item.title||'新对话');const meta=document.createElement('small');meta.textContent=new Intl.DateTimeFormat('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}).format(new Date(item.updatedAt||item.createdAt));open.append(title,meta);open.onclick=()=>{const pending=pendingMeetingRequest,handoff=pendingHomeHandoff;pendingMeetingRequest='';pendingHomeHandoff='';saveHistory();startSession(item.assistant,'',item,{homeHandoff:handoff});if(pending)sendToAgent(pending)};list.append(open)}}
+function initWorkspaceSplitters() {
+  const layout = $('workspaceLayout');
+  const workspace = $('workspaceView');
+  const panels = [$('workspaceHistory'), $('workspaceChat'), $('workspaceResults')];
+  const handles = [...layout.querySelectorAll('.workspace-splitter')];
+  const trackNames = ['history', 'chat', 'results'];
+  let drag = null;
+
+  function measure() {
+    if (workspace.dataset.assistant !== 'meeting' || !handles[0].offsetWidth) return null;
+    const style = getComputedStyle(layout);
+    return {
+      widths: panels.map(panel => panel.getBoundingClientRect().width),
+      minimums: trackNames.map(name => parseFloat(style.getPropertyValue('--' + name + '-min'))),
+    };
+  }
+
+  function updateAccessibleWidths() {
+    const geometry = measure();
+    if (!geometry) return;
+    const {widths, minimums} = geometry;
+    handles.forEach((handle, index) => {
+      const controlled = index === 0 ? 0 : 2;
+      const max = widths[index] + widths[index + 1] - minimums[1];
+      handle.setAttribute('aria-valuemin', minimums[controlled]);
+      handle.setAttribute('aria-valuemax', Math.round(max));
+      handle.setAttribute('aria-valuenow', Math.round(widths[controlled]));
+      handle.setAttribute('aria-valuetext', Math.round(widths[controlled]) + ' 像素');
+    });
+  }
+
+  function resizePair(geometry, index, delta) {
+    const {widths, minimums} = geometry;
+    const lower = minimums[index] - widths[index];
+    const upper = widths[index + 1] - minimums[index + 1];
+    const shift = Math.min(Math.max(delta, lower), upper);
+    const adjusted = widths.slice();
+    adjusted[index] += shift;
+    adjusted[index + 1] -= shift;
+    const slack = adjusted.map((width, i) => Math.max(0, width - minimums[i]));
+    const total = slack.reduce((sum, width) => sum + width, 0);
+    if (!total) return;
+    const panelMinimums = minimums.reduce((sum, width) => sum + width, 0);
+    trackNames.forEach((name, i) => {
+      const fraction = slack[i] / total;
+      layout.style.setProperty(
+        '--' + name + '-track',
+        'calc(var(--' + name + '-min) + (100% - ' + panelMinimums + 'px - 2 * var(--split-width)) * ' + fraction + ')',
+      );
+    });
+    updateAccessibleWidths();
+  }
+
+  function stopDrag(handle, pointerId) {
+    if (!drag || drag.handle !== handle || drag.pointerId !== pointerId) return;
+    drag = null;
+    handle.classList.remove('is-dragging');
+    document.body.classList.remove('workspace-resizing');
+  }
+
+  handles.forEach((handle, index) => {
+    handle.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || drag) return;
+      const geometry = measure();
+      if (!geometry) return;
+      event.preventDefault();
+      handle.focus({preventScroll:true});
+      handle.setPointerCapture(event.pointerId);
+      drag = {handle, pointerId:event.pointerId, start:event.clientX, geometry};
+      handle.classList.add('is-dragging');
+      document.body.classList.add('workspace-resizing');
+    });
+    handle.addEventListener('pointermove', event => {
+      if (drag?.handle !== handle || event.pointerId !== drag.pointerId) return;
+      resizePair(drag.geometry, index, event.clientX - drag.start);
+    });
+    for (const eventName of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+      handle.addEventListener(eventName, event => stopDrag(handle, event.pointerId));
+    }
+    handle.addEventListener('keydown', event => {
+      if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
+      const geometry = measure();
+      if (!geometry) return;
+      event.preventDefault();
+      const step = event.shiftKey ? 36 : 12;
+      const deltas = {ArrowLeft:-step,ArrowRight:step,Home:-Infinity,End:Infinity};
+      resizePair(geometry, index, deltas[event.key]);
+    });
+  });
+
+  new ResizeObserver(updateAccessibleWidths).observe(layout);
+}
+
 function setWorkspacePane(pane) {
   $('workspaceView').dataset.pane = pane;
   for (const button of $('workspaceSwitch').querySelectorAll('button[data-pane]')) {
@@ -600,6 +721,7 @@ async function refreshModelStatus() {
 }
 
 initMeetingWorkflow();
+initWorkspaceSplitters();
 openInitialWorkspace();
 refreshModelStatus();
 </script>
