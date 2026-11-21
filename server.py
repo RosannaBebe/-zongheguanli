@@ -89,6 +89,8 @@ def clean_meeting_profile(value, *, resolve_titles=True):
             participant["type"] = person.get("type") if person.get("type") in ("sei", "visitor") else ""
             if resolve_titles and participant["type"] == "sei" and person.get("title_source") in ("mock", "directory"):
                 participant["title_source"] = person["title_source"]
+            if resolve_titles and person.get("mock") is True:
+                participant["mock"] = True
             participants.append(fill_sei_title(participant) if resolve_titles else participant)
     meal = value.get("meal")
     meal = meal if isinstance(meal, dict) else {}
@@ -118,6 +120,8 @@ def resolve_chat_participants(people, previous, latest):
             and (not old["company"] or not person["company"] or old["company"] == person["company"])
         ]
         prior = matches[0] if len(matches) == 1 else {}
+        if prior.get("mock") is True:
+            person["mock"] = True
         if not person["title"] or compact(person["title"]) not in supplied:
             person["title"] = prior.get("title", "")
             if prior.get("title_source"):
@@ -150,7 +154,12 @@ class ModelServiceError(RuntimeError):
     pass
 
 
-def llm(messages, profile, max_tokens=1200, required_json_key=None, *, allow_private=False):
+class InvalidModelReply(ModelServiceError):
+    def __init__(self):
+        super().__init__("模型暂未返回有效回复，请重试")
+
+
+def llm(messages, profile, max_tokens=1200, required_json_key=None, *, allow_private=False, attempts=2):
     if not profile:
         raise ModelServiceError("请在模型设置中启用一个模型")
 
@@ -168,12 +177,13 @@ def llm(messages, profile, max_tokens=1200, required_json_key=None, *, allow_pri
     if urlsplit(profile["url"]).hostname == "api.deepseek.com":
         payload["thinking"] = {"type": "disabled"}
         payload["response_format"] = {"type": "json_object"}
-    for attempt in range(2):
+    for attempt in range(attempts):
+        can_retry = attempt + 1 < attempts
         try:
             status, data = request_model(profile["url"], profile["api_key"], payload,
                                          allow_private=allow_private or profile.get("use_default_key", False))
             if status != 200:
-                if attempt == 0 and status in (408, 500, 502, 503, 504):
+                if can_retry and status in (408, 500, 502, 503, 504):
                     continue
                 reason = {
                     401: "模型 API Key 无效", 402: "模型 API 余额不足",
@@ -188,11 +198,11 @@ def llm(messages, profile, max_tokens=1200, required_json_key=None, *, allow_pri
         except ModelConfigError as error:
             raise ModelServiceError(str(error)) from None
         except (OSError, http.client.HTTPException):
-            if attempt == 0:
+            if can_retry:
                 continue
             raise ModelServiceError("暂时无法连接模型 API") from None
         except (KeyError, IndexError, TypeError, ValueError):
-            if attempt == 0:
+            if can_retry:
                 request_messages[0]["content"] += (
                     "\n本次请直接返回包含所需字段的有效 JSON 对象。"
                     "JSON 必须完整且包含非空内容，无需 Markdown 代码围栏。"
@@ -200,7 +210,7 @@ def llm(messages, profile, max_tokens=1200, required_json_key=None, *, allow_pri
                 if required_json_key:
                     request_messages[0]["content"] += f"顶层必须有 {required_json_key} 对象。"
                 continue
-            raise ModelServiceError("模型暂未返回有效回复，请重试") from None
+            raise InvalidModelReply() from None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -237,7 +247,8 @@ class Handler(BaseHTTPRequestHandler):
                 and self.client_address[0] in {"127.0.0.1", "::1"})
 
     def call_model(self, messages, max_tokens=1200, required_json_key=None):
-        return llm(messages, self.active_model, max_tokens, required_json_key, allow_private=self.is_local())
+        return llm(messages, self.active_model, max_tokens, required_json_key,
+                   allow_private=self.is_local(), attempts=self.model_attempts)
 
     def update_model_settings(self, data):
         origin = urlsplit(self.headers.get("Origin", ""))
@@ -307,10 +318,14 @@ class Handler(BaseHTTPRequestHandler):
             ]
             return self.send_json(200, {"participants": people})
         try:
+            self.model_attempts = 1 if data.get("retry") is True else 2
             return self.handle_model_request(data)
         except ModelServiceError as error:
             status = 502 if self.active_model else 503
-            return self.send_json(status, {"error": str(error)})
+            payload = {"error": str(error)}
+            if isinstance(error, InvalidModelReply):
+                payload["code"] = "invalid_model_reply"
+            return self.send_json(status, payload)
 
     def handle_material(self, data):
         profile = clean_meeting_profile(data.get("profile"))
@@ -352,6 +367,7 @@ class Handler(BaseHTTPRequestHandler):
             "\n输出一个 JSON 对象，字段 content 是可直接审阅的纯文本正文。"
             "\n未提供的事实标为待确认，不擅自补造。历史会议的参考材料只用来参考结构和表述。"
             "\n使用 title_source 为 mock 的职务时，在该职务后标注（模拟），不得将其表述为正式职务。"
+            "\n名单中 mock 为 true 的条目属于模拟数据。"
         )
         source = {
             "材料": title, "要求": task, "本场会议": profile,
@@ -366,7 +382,7 @@ class Handler(BaseHTTPRequestHandler):
         result = parse_json_object(answer) or {}
         content = clean_text(result.get("content"))
         if not content:
-            raise ModelServiceError("模型未返回可用的" + title)
+            raise InvalidModelReply()
         return self.send_json(200, {"key": key, "content": content, "mock": key == "seat_plan"})
 
     def download_materials(self, data):
@@ -463,6 +479,8 @@ class Handler(BaseHTTPRequestHandler):
             reply=result.get("reply")
             show_shortcuts=result.get("show_shortcuts")
             if not isinstance(reply,str) or not reply.strip():
+                if not candidate:
+                    raise InvalidModelReply()
                 reply="好的，我陪您一起梳理。您眼下最希望先解决的是什么？"
                 show_shortcuts=True
             summary=result.get("handoff_summary","")
@@ -519,6 +537,10 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     reply = self.call_model(model_messages, required_json_key="meeting")
                     result = parse_json_object(reply) or {}
+                    if not clean_text(result.get("reply")) and not result.get("meeting") and not explicit_facts:
+                        raise InvalidModelReply()
+                except InvalidModelReply:
+                    raise
                 except ModelServiceError:
                     if not explicit_facts:
                         raise
@@ -551,10 +573,11 @@ class Handler(BaseHTTPRequestHandler):
                 })
             reply = self.call_model(model_messages)
             result=parse_json_object(reply) or {}
-            text_reply=result.get("reply")
-            if not isinstance(text_reply,str) or not text_reply.strip():text_reply=reply
-            artifact=result.get("artifact")
-            if not isinstance(artifact,str) or not artifact.strip():artifact=text_reply
+            artifact = clean_text(result.get("artifact"), 12000)
+            text_reply = clean_text(result.get("reply"), 12000) or artifact
+            if not text_reply:
+                raise InvalidModelReply()
+            artifact = artifact or text_reply
             return self.send_json(200,{"reply":text_reply[:12000],"artifact":artifact[:12000],"shared_memory_patch":clean_memory_patch(result.get("shared_memory_patch"))})
         return self.send_json(404,{"error":"未找到接口"})
 

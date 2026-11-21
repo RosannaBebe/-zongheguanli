@@ -62,7 +62,7 @@ function persistMeetingRecord(r) {
   const visitors = meetingArray(VISITOR_KEY);
   let changed = false;
   for (const person of r.participants) {
-    if (person.type !== 'visitor' || !person.company || !person.name || !person.title) continue;
+    if (person.type !== 'visitor' || person.mock || !person.company || !person.name || !person.title) continue;
     const key = (person.company + '|' + person.name).toLowerCase().replace(/\s/g, '');
     const existing = visitors.findIndex(visitor => visitor.key === key);
     const previous = visitors[existing];
@@ -93,7 +93,7 @@ function archiveMeetingMaterial(r, key, content) {
     versions: [...(previous?.versions || [])],
   };
   if (entry.versions.at(-1)?.content === content) return;
-  entry.versions.push({content, updatedAt: entry.updatedAt});
+  entry.versions.push({content, mock: content.startsWith('【模拟数据】'), updatedAt: entry.updatedAt});
   if (existing >= 0) library.splice(existing, 1);
   library.unshift(entry);
   writeMeetingLibrary(MATERIAL_LIBRARY_KEY, library);
@@ -190,10 +190,38 @@ function meetingPhase(r) {
   return '已暂停，等待确认继续';
 }
 
-async function runMeetingProduction() {
+function mockMeetingMaterial(r, key, instructions = '') {
+  const f = r.facts;
+  const basics = `${f.topic}\n${f.date} ${f.time} · ${f.location}`;
+  const rows = r.participants.map(person => [person.type === 'sei' ? 'SEI' : person.company, person.name, person.title].filter(Boolean).join(' · '));
+  const examples = {
+    handbook: `${basics}\n\n议程示例\n1. 介绍参会人员\n2. 交流讨论\n3. 汇总待办事项`,
+    roster: rows.join('\n'),
+    notice: `拟于 ${f.date} ${f.time} 在 ${f.location} 召开${f.topic}。请参会人员提前准备交流材料。`,
+    seat_plan: '屏幕方向\n' + r.participants.map((person, index) => `席位 ${index + 1} · ${person.name}`).join('\n'),
+    table_tents: r.participants.map(person => r.tentLanguage === 'zh-en'
+      ? person.name + ' / ' + (person.english_name || '英文姓名待核对') : person.name).join('\n\n'),
+    dining_plan: '用餐桌位示例\n' + r.participants.map((person, index) => `第 ${Math.floor(index / 8) + 1} 桌 · ${person.name}`).join('\n'),
+  };
+  const note = instructions ? '\n\n本次修改要求（待落实）\n' + instructions : '';
+  return '【模拟数据】\n' + MATERIAL_TITLES[key] + '\n\n' + examples[key] + note;
+}
+
+function saveMeetingMaterial(r, key, content, mock = false) {
+  if ((mock || r.mockSteps?.length) && !content.startsWith('【模拟数据】')) {
+    content = '【模拟数据】\n' + content;
+  }
+  r.materials[key] = content;
+  archiveMeetingMaterial(r, key, content);
+  persistMeetingRecord(r);
+  currentMaterialTab = key;
+}
+
+async function runMeetingProduction(options = {}) {
   const r = getMeetingRecord();
   if (!r || productionRun || busy || editingMeetingMaterial || !meetingReady(r)) return;
   if (!meetingNextMaterial(r)) return;
+  retireWorkspaceRecovery();
   r.production.started = true;
   r.production.needsResume = false;
   persistMeetingRecord(r);
@@ -210,22 +238,26 @@ async function runMeetingProduction() {
       }
       run.key = key;
       renderMeetingWorkflow();
-      const response = await request('/api/meeting/material', {
+      const simulated = options.mockKey === key;
+      const response = simulated ? {key, content: mockMeetingMaterial(r, key, r.production.notes[key])}
+        : await request('/api/meeting/material', {
         key, profile: r, materials: r.materials, instructions: r.production.notes[key] || '',
         reference: r.production.references[key] || '',
-      }, {signal: run.controller.signal});
+      }, {signal: run.controller.signal, retry: options.retryKey === key});
       if (productionRun !== run || active !== run.session) return;
-      if (response.key !== key || !response.content) throw new Error('材料生成结果为空');
-      r.materials[key] = response.content;
-      archiveMeetingMaterial(r, key, response.content);
-      persistMeetingRecord(r);
-      currentMaterialTab = key;
+      if (response.key !== key || !response.content) {
+        throw Object.assign(new Error('材料生成结果为空'), {code: 'invalid_model_reply'});
+      }
+      saveMeetingMaterial(r, key, response.content, simulated);
+      if (simulated) {
+        makeMessage(`已在右侧展示${MATERIAL_TITLES[key]}的模拟数据。我会继续处理下一项。`, 'assistant', true, {demo: true});
+      }
       renderMeetingWorkflow();
     }
     makeMessage('本场会议所需材料已全部制作完成，并为您保存入库。您可在右侧逐份审阅和修改，也可以打包下载 PDF 或 Word。', 'assistant');
   } catch (error) {
     if (productionRun !== run || active !== run.session || error.name === 'AbortError') return;
-    makeMessage(`${MATERIAL_TITLES[run.key]}暂未生成：${error.message}。已完成的材料已保留，您可以继续重试。`, 'assistant');
+    showWorkspaceFailure(error, `${MATERIAL_TITLES[run.key]}暂未生成：`, {kind: 'material', key: run.key});
   } finally {
     if (productionRun === run) {
       productionRun = null;
@@ -316,12 +348,14 @@ function applyMeetingPatch(r, patch) {
   return changed;
 }
 
-async function reviseMeetingMaterial(r, revision) {
+async function reviseMeetingMaterial(r, revision, options = {}) {
   const key = revision.key;
   if (!MATERIAL_TITLES[key]) return false;
   const instructions = revision.instruction;
-  r.production.notes[key] = [r.production.notes[key], instructions].filter(Boolean).join('\n').slice(-2400);
-  persistMeetingRecord(r);
+  if (!options.replay) {
+    r.production.notes[key] = [r.production.notes[key], instructions].filter(Boolean).join('\n').slice(-2400);
+    persistMeetingRecord(r);
+  }
   if (!r.materials[key]) {
     makeMessage(`已记下对${MATERIAL_TITLES[key]}的修改要求，继续制作时会按这个要求处理。`, 'assistant');
     return true;
@@ -329,16 +363,23 @@ async function reviseMeetingMaterial(r, revision) {
   const session = active;
   const pending = makeMessage(`正在修改${MATERIAL_TITLES[key]}…`, 'pending', false);
   try {
-    const out = await request('/api/meeting/material', {
+    const out = options.mock ? {content: mockMeetingMaterial(r, key, instructions)} : await request('/api/meeting/material', {
       key, revision: true, profile: r, materials: r.materials, instructions,
-    });
+    }, {retry: options.replay});
     if (active !== session) return false;
-    r.materials[key] = out.content;
-    currentMaterialTab = key;
-    archiveMeetingMaterial(r, key, out.content);
-    persistMeetingRecord(r);
-    makeMessage(`${MATERIAL_TITLES[key]}已修改并入库，请您审阅。`, 'assistant');
+    if (!out.content) {
+      throw Object.assign(new Error('材料修改结果为空'), {code: 'invalid_model_reply'});
+    }
+    saveMeetingMaterial(r, key, out.content, options.mock || r.materials[key].startsWith('【模拟数据】'));
+    makeMessage(options.mock
+      ? `已展示${MATERIAL_TITLES[key]}的模拟稿，正式修改要求已保留，请您审阅。`
+      : `${MATERIAL_TITLES[key]}已修改并入库，请您审阅。`, 'assistant', true, {demo: Boolean(options.mock)});
     return true;
+  } catch (error) {
+    if (active === session) {
+      showWorkspaceFailure(error, `${MATERIAL_TITLES[key]}暂未修改：`, {kind: 'revision', revision});
+    }
+    return false;
   } finally {
     pending.remove();
   }
@@ -348,8 +389,9 @@ async function sendMeetingMessage(text, options = {}) {
   if (busy || editingMeetingMaterial) return;
   let session = active;
   let r = getMeetingRecord();
-  const runningKey = productionRun?.key || '';
-  const wasRunning = pauseMeetingRun();
+  retireWorkspaceRecovery();
+  const runningKey = productionRun?.key || options.runningKey || '';
+  const wasRunning = pauseMeetingRun() || Boolean(options.runningKey);
   const priorPhase = meetingPhase(r);
   busy = true;
   $('chatSend').disabled = true;
@@ -368,20 +410,22 @@ async function sendMeetingMessage(text, options = {}) {
         return;
       }
     }
-    makeMessage(text, 'user');
-    if (wasRunning) makeMessage('已暂停制作，我先处理您刚补充的意见。', 'assistant');
+    if (!options.replay) {
+      makeMessage(text, 'user');
+      if (wasRunning) makeMessage('已暂停制作，我先处理您刚补充的意见。', 'assistant');
+    }
     renderMeetingWorkflow();
     const pending = makeMessage('正在为您整理…', 'pending', false);
     let out;
     try {
       out = await request('/api/ai/chat', {
-        assistant: 'meeting', messages: session.messages.slice(-30), shared_memory: readSharedMemory(),
+        assistant: 'meeting', messages: workspaceModelMessages(session), shared_memory: readSharedMemory(),
         home_handoff: session.homeHandoff || '',
         meeting_memory: {
           profile: r, phase: priorPhase, current_material: runningKey || meetingNextMaterial(r),
           materials: r.materials, today: new Date().toLocaleDateString('sv-SE', {timeZone: 'Asia/Shanghai'}),
         },
-      });
+      }, {retry: options.replay});
     } finally {
       pending.remove();
     }
@@ -408,7 +452,7 @@ async function sendMeetingMessage(text, options = {}) {
       }
     }
     makeMessage(reply, 'assistant');
-    if (revision) await reviseMeetingMaterial(r, revision);
+    if (revision && !await reviseMeetingMaterial(r, revision)) return;
     if (active !== session) return;
 
     const awaitingLanguage = r.production.tentAsked && meetingNextMaterial(r) === 'table_tents' && !r.tentLanguage;
@@ -429,8 +473,8 @@ async function sendMeetingMessage(text, options = {}) {
     if (!resume && !r.production.needsResume) askMeetingStart(r);
   } catch (error) {
     if (active === session) {
-      makeMessage('这次暂未处理完成：' + error.message, 'assistant');
-      if (wasRunning) makeMessage('制作仍在暂停。您可以重试修改，确认后再继续制作。', 'assistant');
+      const step = meetingIntake(r).findIndex(item => item.missing.length);
+      showWorkspaceFailure(error, '这次暂未处理完成：', {kind: 'chat', text, runningKey, step});
     }
   } finally {
     busy = false;
@@ -440,11 +484,126 @@ async function sendMeetingMessage(text, options = {}) {
   if (resume && active === session) runMeetingProduction();
 }
 
+function canRecoverMeetingModel(operation) {
+  const r = getMeetingRecord();
+  if (!r || productionRun || editingMeetingMaterial) return false;
+  if (operation.kind === 'material') return meetingReady(r) && meetingNextMaterial(r) === operation.key;
+  if (operation.kind === 'revision') return meetingReady(r) && Boolean(r.materials[operation.revision.key]);
+  return operation.kind === 'chat';
+}
+
+async function recoverMeetingModel(operation, mock) {
+  const r = getMeetingRecord();
+  if (operation.kind === 'material') {
+    return runMeetingProduction(mock ? {mockKey: operation.key} : {retryKey: operation.key});
+  }
+  if (operation.kind === 'revision') {
+    const session = active;
+    busy = true;
+    $('chatSend').disabled = true;
+    try {
+      if (await reviseMeetingMaterial(r, operation.revision, {replay: true, mock}) && active === session
+        && r.production.started && meetingNextMaterial(r)) {
+        r.production.needsResume = true;
+        persistMeetingRecord(r);
+        makeMessage('请问是否继续制作其余材料？', 'assistant');
+      }
+    } finally {
+      busy = false;
+      $('chatSend').disabled = false;
+      if (active === session) renderMeetingWorkflow();
+    }
+    return;
+  }
+  if (!mock) {
+    return sendMeetingMessage(operation.text, {replay: true, skipMatch: true, runningKey: operation.runningKey});
+  }
+  return showMeetingIntakeMock(r, operation);
+}
+
+function mockMeetingAttendees(r) {
+  const sample = {sei: 0, visitor: 0};
+  const names = new Set(r.participants.map(person => person.name));
+  function demoName(type) {
+    let name;
+    do {
+      name = `${type === 'sei' ? 'SEI 示例人员' : '外方示例人员'} ${++sample[type]}`;
+    } while (names.has(name));
+    names.add(name);
+    return name;
+  }
+  const fill = (person, type) => {
+    const name = person.name || demoName(type);
+    const company = person.company || (type === 'visitor' ? '示例单位' : '');
+    const title = person.title || (type === 'sei' ? '会务协调代表' : '项目联络代表');
+    const mock = person.mock || type !== person.type || name !== person.name || title !== person.title
+      || (type === 'visitor' && company !== person.company);
+    return mock ? {...person, type, name, company, title, mock: true} : person;
+  };
+  const people = r.participants.map(person => fill(person, ['sei', 'visitor'].includes(person.type)
+    ? person.type : r.facts.no_external_attendees ? 'sei' : 'visitor'));
+  if (!people.some(person => person.type === 'sei')) people.push(fill({}, 'sei'));
+  if (r.facts.no_external_attendees !== true && !people.some(person => person.type === 'visitor')) {
+    people.push(fill({}, 'visitor'));
+  }
+  const count = Number(r.facts.attendee_count);
+  if (Number.isInteger(count) && count > people.length && count <= 100) {
+    while (people.length < count) people.push(fill({}, 'sei'));
+  } else if (r.facts.attendee_count && count !== people.length) {
+    r.facts.attendee_count = String(people.length);
+  }
+  r.participants = people;
+}
+
+function showMeetingIntakeMock(r, operation) {
+  const steps = meetingIntake(r);
+  const index = operation.step ?? steps.findIndex(step => step.missing.length);
+  const before = JSON.stringify([r.facts, r.participants, r.meal]);
+  if (index < 0) {
+    const key = meetingNextMaterial(r);
+    makeMessage('【模拟数据】会议信息已齐，您可以继续查看会议工作台。', 'assistant', true, {demo: true});
+    if (key === 'table_tents' && r.production.tentAsked && !r.tentLanguage) {
+      const text = operation.text || '';
+      r.tentLanguage = !/不要英文|不需要英文|只要中文/.test(text) && /英文|双语/.test(text) ? 'zh-en' : 'zh';
+      makeMessage(`【模拟数据】本次演示使用${r.tentLanguage === 'zh-en' ? '中英文' : '中文'}桌签。`, 'assistant', true, {demo: true});
+      return runMeetingProduction({mockKey: key});
+    }
+    const text = operation.text || '';
+    if (key && !operation.runningKey && /^(?:好[的呀]?|可以|同意|确认|(?:请)?(?:开始|继续)(?:制作(?:会议材料|材料)?|做)?)[。！!\s]*$/.test(text.trim())) {
+      return runMeetingProduction({mockKey: key});
+    }
+    return;
+  }
+  if (index === 0) {
+    const examples = {
+      topic: '项目工作协调会（示例）',
+      date: new Date().toLocaleDateString('sv-SE', {timeZone: 'Asia/Shanghai'}),
+      time: '09:00',
+      location: '示例会议室',
+    };
+    for (const [field, value] of Object.entries(examples)) {
+      if (!r.facts[field]) r.facts[field] = value;
+    }
+  } else if (index === 1) {
+    mockMeetingAttendees(r);
+  } else {
+    if (typeof r.meal.required !== 'boolean') r.meal.required = !/不(?:需(?:要)?|用|安排)?(?:就餐|用餐|吃饭)|无用餐|不吃/.test(operation.text || '');
+    if (r.meal.required && !r.meal.special_diet) r.meal.special_diet = '无';
+  }
+  r.mockSteps = [...new Set([...(r.mockSteps || []), index])];
+  editingIntakeStep = null;
+  changedMeetingFacts(r, before);
+  persistMeetingRecord(r);
+  makeMessage(`【模拟数据】已补齐「${steps[index].title}」的示例信息，您可以在右侧查看或修改。`, 'assistant', true, {demo: true});
+  askMeetingStart(r);
+  renderMeetingWorkflow();
+}
+
 function renderAttendeeList(r, editable = false) {
   const people = r.participants.map((person, index) => {
     const role = {visitor: '外方', sei: 'SEI'}[person.type] || '待确认参会方';
     const title = person.title ? person.title + (person.title_source === 'mock' ? '（模拟）' : '') : '职务待补充';
-    const info = [role, person.company, person.name || '姓名待补充', title].filter(Boolean).map(meetingEscape).join(' · ');
+    const info = [role, person.company, person.name || '姓名待补充', title, person.mock && '模拟数据'].filter(Boolean).map(meetingEscape).join(' · ');
     return `<div class="attendee-item"><span>${info}</span>${editable ? `
       <button type="button" class="workflow-btn" data-edit-attendee="${index}">编辑</button>
       <button type="button" class="workflow-btn" data-remove-attendee="${index}">移除</button>` : ''}</div>`;
@@ -482,6 +641,7 @@ function visitorMatches(query) {
 
 function meetingLibraryMatches(query, type) {
   const results = meetingArray(MATERIAL_LIBRARY_KEY).filter(item => item.type === type
+    && (item.meetingId === active.id || !item.versions?.at(-1)?.mock)
     && [item.meetingName, item.title].join(' ').toLowerCase().includes(query.trim().toLowerCase())).slice(0, 20);
   return results.map(item => {
     const content = item.versions?.at(-1)?.content;
@@ -559,7 +719,7 @@ function renderMeetingIntake(r, steps, startAction, productionVisible) {
     if (item.missing.length || (isEditing && index === stepIndex) || (index === 2 && steps[1].missing.length)) return '';
     return `<li class="intake-confirmed">
       <span class="meeting-step-number intake-check" aria-label="已确认">✓</span>
-      <div><strong>${index + 1} · ${item.title}</strong><p>${meetingEscape(summaries[index])}</p>
+      <div><strong>${index + 1} · ${item.title}${r.mockSteps?.includes(index) ? ' · 模拟数据' : ''}</strong><p>${meetingEscape(summaries[index])}</p>
         ${index === 1 ? `<details class="attendee-review"><summary>查看参会名单</summary>${renderAttendeeList(r)}</details>` : ''}
       </div>
       <div class="intake-confirmed-actions">
@@ -635,7 +795,7 @@ function renderMeetingWorkflow() {
         <span class="meeting-section-meta">${completed.length} / ${r.meal.required === false ? 5 : 6} 已完成</span></div>
       <ol class="meeting-step-list production">${MEETING_ITEMS.map(([key, label], index) => {
         const skipped = key === 'dining_plan' && r.meal.required === false;
-        const status = skipped ? '无需制作' : r.materials[key] ? '已完成'
+        const status = skipped ? '无需制作' : r.materials[key] ? (r.materials[key].startsWith('【模拟数据】') ? '模拟数据' : '已完成')
           : runningKey === key ? '制作中' : needsLanguage && key === next ? '待确认语言'
             : ready && key === next && r.production.started ? '待继续' : '待制作';
         return `<li><span class="meeting-step-number">${index + 1}</span><strong>${label}</strong>
@@ -704,6 +864,7 @@ function updateMeetingIntake(r, changeAttendees) {
   readMeetingIntake(r);
   if (changeAttendees) changeAttendees(r.participants);
   const changed = changedMeetingFacts(r, before);
+  if (changed || wasRunning) retireWorkspaceRecovery();
   persistMeetingRecord(r);
   if ((changed || wasRunning) && r.production.needsResume && meetingReady(r)) {
     makeMessage('会议信息已更新。请问是否按更新后的信息继续制作？', 'assistant');
@@ -785,6 +946,7 @@ async function saveMeetingAttendee(r, button) {
     && (person.company === company || !person.company || !company)
   );
   const entry = {type, company, name, title, english_name: existing?.name === name ? existing.english_name || '' : ''};
+  if (existing?.mock && existing.name === name && existing.company === company && existing.title === title) entry.mock = true;
   if (!previous && !title && existing?.title) {
     entry.title = existing.title;
     if (existing.title_source) entry.title_source = existing.title_source;
@@ -847,10 +1009,8 @@ function initMeetingWorkflow() {
       if (editingMeetingMaterial) {
         const content = $('meetingMaterialEditor').value.trim();
         if (!content) return $('meetingMaterialEditor').focus();
-        r.materials[d.editMaterial] = content;
         editingMeetingMaterial = '';
-        archiveMeetingMaterial(r, d.editMaterial, content);
-        persistMeetingRecord(r);
+        saveMeetingMaterial(r, d.editMaterial, content, r.materials[d.editMaterial].startsWith('【模拟数据】'));
         if (meetingNextMaterial(r) && r.production.started) {
           makeMessage('修改已保存入库。请问是否继续制作其余材料？', 'assistant');
         }

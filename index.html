@@ -342,6 +342,11 @@ body.pan-active .top-actions{justify-content:flex-end;min-width:0}
 .pan-reply-shortcut svg{width:16px;height:16px}
 .home.is-conversation .home-model-error{justify-content:flex-end;padding:0;max-width:100%;flex-wrap:wrap}
 .home.is-conversation .home-model-error button{padding:4px 8px}
+.model-recovery-actions{display:flex;flex-wrap:wrap;gap:7px;align-self:flex-start}
+.messages > .model-recovery-actions{margin-top:-6px}
+.model-recovery-actions .button{min-height:33px;padding:5px 11px;color:#244e7a}
+.model-recovery-actions .button:last-child{background:#eaf2fc}
+.model-recovery-actions .button:last-child:hover{background:#dbe9fa}
 .home.is-conversation .home-form{
   grid-column:2;grid-row:2;
   width:min(calc(100% - 28px),712px);margin:0 auto max(14px,env(safe-area-inset-bottom));padding:10px 14px;
@@ -522,13 +527,10 @@ function renderHomeTranscript(scroll = true) {
       status.setAttribute('role', 'status');
       const label = document.createElement('span');
       label.textContent = '发送失败 · ' + entry.failure;
-      const retry = document.createElement('button');
-      retry.type = 'button';
-      retry.className = 'button';
-      retry.textContent = '重试';
-      retry.disabled = Boolean(homeRequest);
-      retry.addEventListener('click', () => sendHomeMessage(entry, homeConversation));
-      status.append(label, retry);
+      const conversation = homeConversation;
+      const retry = () => sendHomeMessage(entry, conversation);
+      const mock = isInvalidModelReply(entry.failure) ? () => sendHomeMessage(entry, conversation, true) : null;
+      status.append(label, createModelRecoveryActions(retry, mock, Boolean(homeRequest)));
       row.append(status);
     }
     transcript.append(row);
@@ -564,7 +566,89 @@ function restoreHomeConversation(item) {
 }
 
 function saveHistory(){if(!active||(!active.messages.length&&active.assistant!=='meeting'))return;active.updatedAt=new Date().toISOString();const first=active.messages.find(m=>m.role==='user');if(first)active.title=active.assistant==='meeting'?(active.meetingName||first.text.slice(0,42)):first.text.slice(0,42);let items=readHistory().filter(x=>x.id!==active.id);items.unshift(active);try{localStorage.setItem(HISTORY_KEY,JSON.stringify(items.slice(0,200)))}catch(_){}renderAgentHistory()}
-function makeMessage(text,role='assistant',persist=true){const el=document.createElement('div');el.className='message '+role;el.textContent=text;$('messages').appendChild(el);$('messages').scrollTop=$('messages').scrollHeight;if(persist&&active){active.messages.push({role,text,at:new Date().toISOString()});saveHistory()}return el}
+function makeMessage(text, role = 'assistant', persist = true, details = {}) {
+  const el = document.createElement('div');
+  el.className = 'message ' + role;
+  el.textContent = text;
+  const log = $('messages');
+  log.append(el);
+  if (persist && active) {
+    active.messages.push({role, text, at: new Date().toISOString(), ...details});
+    saveHistory();
+  }
+  log.scrollTop = log.scrollHeight;
+  return el;
+}
+
+function isInvalidModelReply(error) {
+  return error?.code === 'invalid_model_reply'
+    || /模型暂未返回有效回复[，,]\s*请重试|模型未返回可用的/.test(error?.message || error || '');
+}
+
+function createModelRecoveryActions(retry, mock, disabled = false) {
+  const actions = document.createElement('div');
+  actions.className = 'model-recovery-actions';
+  actions.setAttribute('role', 'group');
+  actions.setAttribute('aria-label', '模型回复恢复');
+  for (const [label, action] of [['重试', retry], ['模拟数据', mock]]) {
+    if (!action) continue;
+    const button = document.createElement('button');
+    button.className = 'button';
+    button.type = 'button';
+    button.textContent = label;
+    button.disabled = disabled;
+    button.addEventListener('click', action);
+    actions.append(button);
+  }
+  return actions;
+}
+
+function retireWorkspaceRecovery() {
+  for (const entry of active?.messages || []) {
+    if (entry.recovery) entry.recovery = null;
+  }
+  $('messages').querySelectorAll('.model-recovery-actions').forEach(node => node.remove());
+}
+
+function workspaceModelMessages(session) {
+  return session.messages.filter(message => !message.failed && !message.demo).slice(-30);
+}
+
+function attachWorkspaceRecovery(entry, session) {
+  if (!entry?.recovery) return;
+  const run = mock => {
+    if (active !== session || !entry.recovery || busy) return;
+    const operation = entry.recovery;
+    if (session.assistant === 'meeting' && !canRecoverMeetingModel(operation)) return;
+    retireWorkspaceRecovery();
+    saveHistory();
+    if (session.assistant === 'meeting') recoverMeetingModel(operation, mock);
+    else sendToAgent(operation.text, {replay: true, mock});
+  };
+  const log = $('messages');
+  log.append(createModelRecoveryActions(() => run(false), () => run(true)));
+  log.scrollTop = log.scrollHeight;
+}
+
+function showWorkspaceFailure(error, label, operation) {
+  const recoverable = isInvalidModelReply(error);
+  makeMessage(label + error.message, 'assistant', true, {
+    failed: true, recovery: recoverable ? operation : null,
+  });
+  if (recoverable) attachWorkspaceRecovery(active.messages.at(-1), active);
+}
+
+function restoreWorkspaceTranscript(session) {
+  for (const entry of session.messages || []) makeMessage(entry.text, entry.role, false);
+  const last = session.messages?.at(-1);
+  const user = session.messages?.findLast(message => message.role === 'user');
+  if (last && !Object.hasOwn(last, 'recovery') && last.role === 'assistant' && user
+    && isInvalidModelReply(last.text) && /^(这次暂未处理完成|暂时未能完成)/.test(last.text)) {
+    last.failed = true;
+    last.recovery = {kind: 'chat', text: user.text};
+  }
+  attachWorkspaceRecovery(last, session);
+}
 function renderAgentHistory(){if(!active)return;const cfg=assistants[active.assistant],list=$('agentHistoryList');$('agentHistoryTitle').textContent=cfg.listTitle;$('newConversation').textContent=active.assistant==='meeting'?'＋ 新建会议':'＋ 新建对话';list.replaceChildren();const items=readHistory().filter(x=>x.assistant===active.assistant).sort((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt)));$('agentHistoryEmpty').hidden=!!items.length;$('agentHistoryEmpty').textContent=active.assistant==='meeting'?'暂时没有会议记录。开始沟通后，每场会议都会单独保存在这里，方便您随时接续办理。':'暂时没有此助手的历史记录。您开始沟通后，相关记录会保存在这里。';for(const item of items){const open=document.createElement('button');open.type='button';open.className='agent-history-item'+(item.id===active.id?' active':'');const title=document.createElement('strong');title.textContent=item.assistant==='meeting'?(item.meetingName||item.title||'待确认会议名称'):(item.title||'新对话');const meta=document.createElement('small');meta.textContent=new Intl.DateTimeFormat('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}).format(new Date(item.updatedAt||item.createdAt));open.append(title,meta);open.onclick=()=>{const pending=pendingMeetingRequest,handoff=pendingHomeHandoff;pendingMeetingRequest='';pendingHomeHandoff='';saveHistory();startSession(item.assistant,'',item,{homeHandoff:handoff});if(pending)sendToAgent(pending)};list.append(open)}}
 function initWorkspaceSplitters() {
   const layout = $('workspaceLayout');
@@ -679,14 +763,36 @@ $('workspaceSwitch').hidden = intent !== 'meeting';
 $('resultTitle').textContent = intent === 'meeting' ? '会议工作台' : '工作成果';
 setWorkspacePane('chat');
 active=restore||{id:(crypto.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2)),assistant:intent,title:'新对话',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),messages:[],meetingName:'',meetingFacts:{}};active.assistant=intent;active.meetingFacts=active.meetingFacts||{};if(intent==='meeting')getMeetingRecord();let importedHandoff='';try{importedHandoff=sessionStorage.getItem('zongzhi.current-home-handoff')||'';if(importedHandoff)sessionStorage.removeItem('zongzhi.current-home-handoff')}catch(_){}active.homeHandoff=options.homeHandoff||active.homeHandoff||importedHandoff;$('messages').replaceChildren();$('homeView').hidden=true;$('workspaceView').hidden=false;$('topbar').hidden=true;$('workspaceTitle').textContent=cfg.name;$('agentName').textContent=PAN_NAME;$('chatAvatar').src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(cfg.portrait);$('chatAvatar').alt=PAN_NAME+'的形象';$('agentTagline').textContent=cfg.tagline;$('workspaceSubtitle').textContent=intent==='meeting'&&active.meetingName?'当前会议 · '+active.meetingName:cfg.tagline;$('resultDescription').textContent=cfg.description+' · 工作过程与成果展示';$('resultState').textContent='等待开始';$('resultState').classList.remove('ready');$('resultContent').textContent='';$('resultContent').hidden=false;$('meetingWorkflow').hidden=intent!=='meeting';$('resultPlaceholder').hidden=intent==='meeting';renderAgentHistory();
-if(restore){for(const m of restore.messages||[])makeMessage(m.text,m.role,false);if(restore.messages?.length){$('resultPlaceholder').hidden=true;$('resultContent').textContent=restore.messages.filter(m=>m.role==='assistant').at(-1)?.text||''}}
+if (restore) {
+  restoreWorkspaceTranscript(restore);
+  if (restore.messages?.length) {
+    $('resultPlaceholder').hidden = true;
+    $('resultContent').textContent = restore.result?.content
+      || restore.messages.filter(message => message.role === 'assistant' && !message.failed).at(-1)?.text || '';
+    if (restore.result) {
+      $('resultState').textContent = restore.result.mock ? '模拟数据' : '已更新';
+      $('resultState').classList.add('ready');
+    }
+  }
+}
 else if(!options.silent){makeMessage(cfg.welcome,'assistant',false)}
 const firstRequest=initial||(restore?.messages||[]).find(m=>m.role==='user')?.text||'';$('resultRequest').hidden=!firstRequest;$('resultRequestText').textContent=firstRequest;if(location.hash!=='#workbench/'+intent)history.pushState({workbench:intent},'', '#workbench/'+intent);if(intent==='meeting'){renderMeetingWorkflow();if(restore)recoverSavedMeetingBasics(active)}if(intent!=='meeting')setTimeout(()=>$('chatInput').focus(),50)}
 function simpleIntent(text){if(/会务助手|政务信息助手|公文助手|综合知识库/u.test(text)){if(/政务信息助手/u.test(text))return'information';if(/公文助手/u.test(text))return'official_document';if(/综合知识库/u.test(text))return'knowledge';return'meeting'}if(/(之前|上次|刚才|原来|那场|这场|继续|接着|讨论过|已经聊过).{0,12}(会议|会务|参会|人数|材料)|(会议|会务).{0,10}(改成|调整|更新|继续|接着|之前|上次)/u.test(text))return'meeting';if(/(查询|查找|查阅|搜一下|历史|以前|制度|模板|案例)/u.test(text)&&/(会议制度|会务制度|会议模板|会议案例|公文|信息|资料|要情|制度|模板|案例)/u.test(text))return'knowledge';if(/知识库/u.test(text))return'knowledge';if(/办会|办个会|开会|会议|会务|参会|会议室|会场/u.test(text))return'meeting';if(/要情|专报|新闻|信息稿|搜集.{0,4}信息/u.test(text))return'information';if(/公文|通知|请示|起草|润色|校对/u.test(text))return'official_document';return''}
-function classify(text, messages, signal) {
-  return request('/api/ai/workbench-intent', {text, messages, shared_memory: readSharedMemory()}, {signal});
+function classify(text, messages, signal, retry) {
+  return request('/api/ai/workbench-intent', {text, messages, shared_memory: readSharedMemory()}, {signal, retry});
 }
-async function request(url,data,options={}){if(location.protocol==='file:')throw new Error('本地 HTML 可查看界面，请通过网站或本地服务使用模型。');const res=await fetch(url,{method:data?'POST':'GET',headers:data?{'Content-Type':'application/json'}:{},body:data?JSON.stringify(data):undefined,signal:options.signal});const body=await res.json().catch(()=>({}));if(!res.ok)throw new Error(body.error||'请求失败');return body}
+async function request(url, data, options = {}) {
+  if (location.protocol === 'file:') throw new Error('本地 HTML 可查看界面，请通过网站或本地服务使用模型。');
+  const res = await fetch(url, {
+    method: data ? 'POST' : 'GET',
+    headers: data ? {'Content-Type': 'application/json'} : {},
+    body: data ? JSON.stringify(options.retry ? {...data, retry: true} : data) : undefined,
+    signal: options.signal,
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(body.error || '请求失败'), {code: body.code});
+  return body;
+}
 async function findPreviousMeeting(text){const items=readHistory().filter(x=>x.assistant==='meeting');if(!items.length)return null;const meetings=items.slice(0,40).map(x=>({id:x.id,name:x.meetingName||'',title:x.title||'',facts:x.meetingFacts||{},messages:(x.messages||[]).filter(m=>m.role==='user').slice(-8).map(m=>m.text.slice(0,300))}));let clarify=false;try{const result=await request('/api/meeting/match',{text,meetings});if(result.match_id){const found=items.find(x=>x.id===result.match_id);if(found)return{conversation:found}}clarify=!!result.clarify}catch(_){}const normalized=text.replace(/[\s，。！？、：:；;“”"'（）()]/g,'').toLowerCase();const exact=items.find(x=>{const name=(x.meetingName||'').replace(/[\s，。！？、：:；;“”"'（）()]/g,'').toLowerCase();return name.length>1&&normalized.includes(name)});if(exact)return{conversation:exact};return clarify?{clarify:true}:null}
 async function sendToAgent(text, options = {}) {
   if (!active || busy) return;
@@ -694,7 +800,8 @@ async function sendToAgent(text, options = {}) {
   const session = active;
   busy = true;
   $('chatSend').disabled = true;
-  makeMessage(text, 'user');
+  retireWorkspaceRecovery();
+  if (!options.replay) makeMessage(text, 'user');
   $('resultRequest').hidden = false;
   $('resultRequestText').textContent = text;
   const pending = makeMessage('正在结合本次记录为您整理，请稍候…', 'pending', false);
@@ -702,20 +809,24 @@ async function sendToAgent(text, options = {}) {
   $('resultState').textContent = '正在处理';
   $('resultState').classList.remove('ready');
   try {
-    const out = await request('/api/ai/chat', {
-      assistant: session.assistant, messages: session.messages.slice(-30),
+    const out = options.mock ? {
+      reply: '已在右侧展示模拟数据供您预览。您可以继续补充要求或提出修改。',
+      artifact: workspaceMockArtifact(session.assistant),
+    } : await request('/api/ai/chat', {
+      assistant: session.assistant, messages: workspaceModelMessages(session),
       shared_memory: readSharedMemory(), home_handoff: session.homeHandoff || '',
-    });
+    }, {retry: options.replay});
     if (active !== session) return;
     mergeSharedMemory(out.shared_memory_patch);
-    makeMessage(out.reply || '已完成。', 'assistant');
-    $('resultContent').textContent = out.artifact || out.reply || '';
-    $('resultState').textContent = '已更新';
+    makeMessage(out.reply, 'assistant', true, {demo: Boolean(options.mock)});
+    session.result = {content: out.artifact || out.reply || '', mock: Boolean(options.mock)};
+    $('resultContent').textContent = session.result.content;
+    $('resultState').textContent = options.mock ? '模拟数据' : '已更新';
     $('resultState').classList.add('ready');
     saveHistory();
   } catch (error) {
     if (active === session) {
-      makeMessage('暂时未能完成：' + error.message, 'assistant');
+      showWorkspaceFailure(error, '暂时未能完成：', {kind: 'chat', text});
       $('resultState').textContent = '处理失败';
     }
   } finally {
@@ -724,6 +835,15 @@ async function sendToAgent(text, options = {}) {
     $('chatSend').disabled = false;
     if (active === session) $('chatInput').focus();
   }
+}
+
+function workspaceMockArtifact(assistant) {
+  const examples = {
+    information: '要情简报示例\n\n摘要：示例项目进入资料核对阶段。\n进展：已汇总三个待核事项。\n后续：核对原始材料并确认报送范围。\n来源：待提供。',
+    official_document: '关于召开工作协调会的通知（示例）\n\n各有关部门：\n拟召开工作协调会，请准备进度说明和待协调事项。会议时间、地点及参会范围以正式通知为准。',
+    knowledge: '制度查询结果示例\n\n条目：会议材料归档流程（示例）\n摘要：整理纪要和相关材料，待确认后归档。\n来源：待核验。',
+  };
+  return '【模拟数据】\n' + examples[assistant];
 }
 
 const homeForm = $('homeForm');
@@ -740,25 +860,31 @@ function homeHandoffSummary(conversation, summary) {
     .filter(entry => entry.role === 'user').map(entry => entry.text).join('；').slice(-1800);
 }
 
-async function sendHomeMessage(entry, conversation) {
+async function sendHomeMessage(entry, conversation, mock = false) {
   if (homeRequest || busy || !conversation) return;
   const index = conversation.messages.indexOf(entry);
   if (index < 0) return;
   const controller = new AbortController();
   const job = {controller};
   homeRequest = job;
+  const retry = Boolean(entry.failure);
   delete entry.failure;
   $('homeThinking').hidden = false;
   const latest = !conversation.messages.slice(index + 1).some(message => message.role === 'user');
   renderHomeTranscript(latest);
   const current = () => homeRequest === job && conversation === homeConversation && !$('homeView').hidden;
   try {
-    const result = await classify(entry.text, conversation.messages.slice(0, index + 1), controller.signal);
+    const result = mock ? {
+      intent: simpleIntent(entry.text),
+      reply: '【模拟数据】您可以先选一项工作，例如安排一次项目协调会，或查找一份制度模板。选定后我会带您进入相应工作区。',
+      show_shortcuts: true,
+    } : await classify(entry.text, conversation.messages.slice(0, index + 1).filter(message => !message.demo), controller.signal, retry);
     if (!current()) return;
     mergeSharedMemory(result.shared_memory_patch);
     const target = latest && Object.hasOwn(assistants, result.intent) ? result.intent : '';
-    const reply = result.reply || (target ? '我会在对应工作区继续为您办理。' : '您眼下最想先处理哪件事？我可以陪您一起梳理。');
-    const response = {role: 'assistant', text: reply, at: new Date().toISOString()};
+    const reply = mock && target ? '【模拟数据】我会进入' + assistants[target].name + '继续为您办理。'
+      : result.reply || (target ? '我会在对应工作区继续为您办理。' : '您眼下最想先处理哪件事？我可以陪您一起梳理。');
+    const response = {role: 'assistant', text: reply, at: new Date().toISOString(), demo: mock};
     if (!target && typeof result.show_shortcuts === 'boolean') response.showShortcuts = result.show_shortcuts;
     if (target) response.routed = true;
     conversation.messages.splice(index + 1, 0, response);
