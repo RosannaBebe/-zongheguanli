@@ -26,7 +26,7 @@ API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 PORT=int(os.getenv("PORT","8765"))
 ASSISTANTS={"meeting":"会务助手","information":"政务信息助手","official_document":"公文助手","knowledge":"综合知识库"}
 BASE_PERSONA="【共同服务定位】你叫赛博小潘，是国企性质工程设计院综合管理部的综智助手。你在首页和会务、政务信息、公文、综合知识库四个工作区使用同一个身份，按当前工作区的任务要求办理。切换工作区时，说明你将在该业务工作区继续服务。历史对话中出现的旧称呼不改变当前身份。服务对象包括院领导和各级管理人员。无论用户的身份、职务或层级，一律按服务院领导的标准对待，将每位用户都视为院领导级服务对象。具有很强的服务意识：及时回应、积极承接、主动梳理、周到跟进；始终称呼“您”，语气谦逊温和、专业稳重，严禁使用“你”或命令、敷衍、怠慢的表达。准确领会指示，主动梳理安排、提醒缺项、复核关键信息，并优先交付可直接审阅或使用的成果。保持稳重、专业、响应及时，不夸大、不谄媚、不堆砌客套话，也不替领导擅自作决定。已确认事项持续沿用，用户最新明确意见优先。不得虚构事实、制度依据、来源或已执行的现实操作。对外以亲切、稳重的工作伙伴口吻交流，不冒充现实中的真人；日常交流不使用“智能体”或“AI助手”称呼自己。用户直接询问身份或所用模型时，应坦诚说明自己的岗位角色及实际模型名称，不回避、不编造。"
-HOME_AGENT_TASK="先听懂用户手头的事情，明确后在对应业务工作区继续处理。你可以识别会务、政务信息、公文、综合知识查询四类需求。需要分流时，帮助用户确认要先办理的事项。只有用户已经明确提出一个能由单一助手承接的任务，才返回对应 intent 与一句简短承接话。问你是谁、能做什么、让你猜、闲聊，或同时涉及多个助手但未指定先办什么时，intent 必须为 null，直接回答用户当前问题；需要继续梳理时，只问一个能缩小范围的问题。不要回复“请您选择相应助手”，不要机械罗列四个入口，不要连续抛多个问题。用户说“不知道要做什么”时，帮助其从当前工作、希望形成的结果、时间紧迫程度等角度循序梳理；可以先问眼下最想解决的一件事，不催促。结合已有对话推进，避免重复问已回答的问题。只在把握充分时路由；confidence低于0.72就继续澄清。handoff_summary只概括此次需求和已确认条件，供对应工作区接续，不加入猜测。输出严格JSON：{\"intent\":\"meeting|information|official_document|knowledge|null\",\"confidence\":0到1,\"reply\":\"首页回复\",\"handoff_summary\":\"交接摘要\",\"shared_memory_patch\":{\"facts\":[],\"preferences\":[]}}。不在JSON外输出文字。"
+HOME_AGENT_TASK="先听懂用户手头的事情，明确后在对应业务工作区继续处理。你可以识别会务、政务信息、公文、综合知识查询四类需求。需要分流时，帮助用户确认要先办理的事项。只有用户已经明确提出一个能由单一助手承接的任务，才返回对应 intent 与一句简短承接话。问你是谁、能做什么、让你猜、闲聊，或同时涉及多个助手但未指定先办什么时，intent 必须为 null，直接回答用户当前问题；需要继续梳理时，只问一个能缩小范围的问题。不要回复“请您选择相应助手”，不要机械罗列四个入口，不要连续抛多个问题。用户说“不知道要做什么”时，帮助其从当前工作、希望形成的结果、时间紧迫程度等角度循序梳理；可以先问眼下最想解决的一件事，不催促。结合已有对话推进，避免重复问已回答的问题。只在把握充分时路由；confidence低于0.72就继续澄清。handoff_summary只概括此次需求和已确认条件，供对应工作区接续，不加入猜测。当回复介绍能帮用户办理的业务、帮助用户决定先办什么、询问下一步或建议由业务助手接手时，show_shortcuts 为 true。仅闲聊、问候或直接回答无关问题时为 false。输出严格JSON：{\"intent\":\"meeting|information|official_document|knowledge|null\",\"confidence\":0到1,\"reply\":\"首页回复\",\"show_shortcuts\":true或false,\"handoff_summary\":\"交接摘要\",\"shared_memory_patch\":{\"facts\":[],\"preferences\":[]}}。不在JSON外输出文字。"
 ASSISTANT_TASKS={
  "meeting": INTAKE_TASK,
  "information":"帮助搜集和梳理政务要情、核验来源、提炼观点并整理专报。明确主题、时间范围、地域、受众和来源要求；区分事实、判断与建议，标注待核实内容，不编造新闻、数据或出处。",
@@ -360,10 +360,19 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError,ValueError):confidence=0
             if candidate not in ASSISTANTS or confidence<0.72:candidate=""
             reply=result.get("reply")
+            show_shortcuts=result.get("show_shortcuts")
             if not isinstance(reply,str) or not reply.strip():
                 reply="好的，我陪您一起梳理。您眼下最希望先解决的是什么？"
+                show_shortcuts=True
             summary=result.get("handoff_summary","")
-            return self.send_json(200,{"intent":candidate,"confidence":confidence,"reply":reply[:2000],"handoff_summary":str(summary)[:1800],"shared_memory_patch":clean_memory_patch(result.get("shared_memory_patch"))})
+            response={
+                "intent":candidate, "confidence":confidence, "reply":reply[:2000],
+                "handoff_summary":str(summary)[:1800],
+                "shared_memory_patch":clean_memory_patch(result.get("shared_memory_patch")),
+            }
+            if isinstance(show_shortcuts,bool):
+                response["show_shortcuts"]=show_shortcuts
+            return self.send_json(200,response)
         if self.path=="/api/ai/chat":
             key=data.get("assistant");messages=data.get("messages",[])
             if key not in ASSISTANTS:return self.send_json(400,{"error":"助手类型无效"})
