@@ -127,33 +127,49 @@ def llm(messages, max_tokens=1200):
         request_messages[0]["content"] += (
             "\n\n本次实际调用模型名称：" + MODEL + "。如果用户询问模型，请如实回答这个名称。"
         )
-    payload = json.dumps({
+    payload = {
         "model": MODEL,
         "messages": request_messages,
         "temperature": 0.3,
         "max_tokens": max_tokens,
         "thinking": {"type": "disabled"},
         "response_format": {"type": "json_object"},
-    }).encode("utf-8")
-    request = urllib.request.Request(
-        BASE_URL + "/chat/completions",
-        data=payload,
-        headers={"Authorization": "Bearer " + API_KEY, "Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=90) as response:
-            data = json.load(response)
-        content = data["choices"][0]["message"]["content"]
-        if not isinstance(content, str) or not content.strip():
-            raise ValueError("empty content")
-        return content
-    except urllib.error.HTTPError as error:
-        raise ModelServiceError(f"DeepSeek API 返回 HTTP {error.code}") from None
-    except (OSError, TimeoutError):
-        raise ModelServiceError("无法连接 DeepSeek API") from None
-    except (KeyError, IndexError, TypeError, ValueError):
-        raise ModelServiceError("DeepSeek API 返回的回复为空或格式异常") from None
+    }
+    for attempt in range(2):
+        request = urllib.request.Request(
+            BASE_URL + "/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Authorization": "Bearer " + API_KEY, "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=45) as response:
+                data = json.load(response)
+            content = data["choices"][0]["message"]["content"]
+            if not isinstance(content, str) or not content.strip() or parse_json_object(content) is None:
+                raise ValueError("invalid JSON content")
+            return content
+        except urllib.error.HTTPError as error:
+            if attempt == 0 and error.code in (408, 500, 502, 503, 504):
+                continue
+            reason = {
+                401: "DeepSeek API 密钥无效",
+                402: "DeepSeek API 余额不足",
+                429: "DeepSeek API 请求过多，请稍后重试",
+            }.get(error.code, f"DeepSeek API 返回 HTTP {error.code}")
+            raise ModelServiceError(reason) from None
+        except (OSError, TimeoutError):
+            if attempt == 0:
+                continue
+            raise ModelServiceError("暂时无法连接 DeepSeek API") from None
+        except (KeyError, IndexError, TypeError, ValueError):
+            if attempt == 0:
+                request_messages[0]["content"] += (
+                    "\n本次请直接返回包含所需字段的有效 JSON 对象。"
+                    "JSON 必须完整且包含非空内容，无需 Markdown 代码围栏。"
+                )
+                continue
+            raise ModelServiceError("模型暂未返回有效回复，请重试") from None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -296,15 +312,23 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200,{"match_id":match_id,"clarify":clarify,"confidence":confidence})
         if self.path=="/api/ai/workbench-intent":
             text=str(data.get("text", ""))[:4000]
-            turns=data.get("messages",[])
-            if not isinstance(turns,list):turns=[]
-            clean=[]
-            for item in turns[-16:]:
-                if not isinstance(item,dict):continue
-                role=item.get("role");content=item.get("text",item.get("content",""))
-                if role in ("user","assistant") and isinstance(content,str):clean.append({"role":role,"content":content[:2500]})
-            if not clean or clean[-1].get("role")!="user" or clean[-1].get("content")!=text:
-                clean.append({"role":"user","content":text})
+            turns = data.get("messages", [])
+            clean = []
+            if isinstance(turns, list):
+                for item in turns[-16:]:
+                    if not isinstance(item, dict):
+                        continue
+                    role = item.get("role")
+                    content = item.get("text", item.get("content", ""))
+                    if role not in ("user", "assistant") or not isinstance(content, str):
+                        continue
+                    if role == "assistant" and content == "暂未连接到模型服务，请稍后再试。":
+                        continue
+                    clean.append({"role": role, "content": content[:2500]})
+            if clean and clean[-1]["role"] == "user" and clean[-1]["content"] == text[:2500]:
+                clean[-1]["content"] = text
+            else:
+                clean.append({"role": "user", "content": text})
             shared=clean_shared_memory(data.get("shared_memory"))
             system=BASE_PERSONA+"\n\n首页综合助手任务："+HOME_AGENT_TASK+"\n\n用户共享记忆（仅作背景参考，以用户当前明确表达为准）："+json.dumps(shared,ensure_ascii=False)[:2500]
             answer=llm([{"role":"system","content":system}]+clean,500)
