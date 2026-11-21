@@ -221,6 +221,28 @@ async function runMeetingProduction() {
   }
 }
 
+async function recoverSavedMeetingBasics(session) {
+  const record = getMeetingRecord();
+  if (!record || record.basicsRecovered || !meetingIntake(record)[0].missing.length) return;
+  const messages = session.messages.filter(message => message.role === 'user');
+  if (!messages.length) return;
+  try {
+    const {facts} = await request('/api/meeting/recover-basics', {messages});
+    if (active !== session) return;
+    for (const key of ['topic', 'date', 'time', 'location']) {
+      if (!record.facts[key] && facts?.[key]) record.facts[key] = facts[key];
+    }
+    record.basicsRecovered = true;
+    persistMeetingRecord(record);
+    if (active === session) {
+      askMeetingStart(record);
+      renderMeetingWorkflow();
+    }
+  } catch (_) {
+    // A temporary failure leaves recovery available when the meeting is reopened.
+  }
+}
+
 function applyMeetingPatch(r, patch) {
   if (!patch) return false;
   let changed = false;
