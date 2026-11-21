@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: zongzhi-assistant
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: SEI_BASE_URL
+        value: https://opendigital.sei.com.cn/v1
+      - key: SEI_MODEL
+        value: DeepSeek-V4-Flash
+      - key: SEI_API_KEY
+        sync: false
