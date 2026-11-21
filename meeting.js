@@ -492,7 +492,10 @@ function renderMeetingIntake(r, steps, startAction, productionVisible) {
     return `<li class="intake-confirmed">
       <span class="meeting-step-number intake-check" aria-label="已确认">✓</span>
       <div><strong>${index + 1} · ${item.title}</strong><p>${meetingEscape(summaries[index])}</p></div>
-      <button type="button" class="workflow-btn intake-edit" data-intake-step="${index}" aria-label="修改${item.title}">修改</button>
+      <div class="intake-confirmed-actions">
+        ${index === 0 && f.location ? `<button type="button" class="workflow-btn room-preview-button" data-room-preview="true" aria-label="查看${meetingEscape(f.location)}会议室俯视示意图">查看会议室</button>` : ''}
+        <button type="button" class="workflow-btn intake-edit" data-intake-step="${index}" aria-label="修改${item.title}">修改</button>
+      </div>
     </li>`;
   }).join('');
   return `<section class="workflow-card">
@@ -681,6 +684,10 @@ function setAttendeeType() {
 
 function initMeetingWorkflow() {
   const root = $('meetingWorkflow');
+  $('meetingRoomClose').addEventListener('click', () => $('meetingRoomDialog').close());
+  $('meetingRoomDialog').addEventListener('click', event => {
+    if (event.target === $('meetingRoomDialog')) $('meetingRoomDialog').close();
+  });
   root.addEventListener('change', event => {
     if (event.target.id === 'attendeeType') setAttendeeType();
     if (event.target.id === 'mealRequired') $('dietField').hidden = event.target.value !== 'yes';
@@ -696,7 +703,12 @@ function initMeetingWorkflow() {
     const r = getMeetingRecord();
     if (!r) return;
     const d = button.dataset;
-    if (d.intakeStep !== undefined) {
+    if (d.roomPreview) {
+      const room = r.facts.location;
+      if (!room) return;
+      $('meetingRoomDialogTitle').textContent = `${room} · 会议室俯视示意`;
+      $('meetingRoomDialog').showModal();
+    } else if (d.intakeStep !== undefined) {
       editingIntakeStep = Number(d.intakeStep);
       renderMeetingWorkflow();
       $('meetingIntakeFields')?.querySelector('summary').focus();

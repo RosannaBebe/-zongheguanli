@@ -243,6 +243,15 @@ class Handler(BaseHTTPRequestHandler):
                                         "base_url": model["url"] if model else "", "fallback_models": []})
         if self.path=="/api/ai/models":
             return self.send_json(200, MODEL_PROFILES.public(self.model_settings))
+        if self.path == "/assets/meeting-room-overhead.svg":
+            raw = (ROOT / "assets" / "meeting-room-overhead.svg").read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.end_headers()
+            self.wfile.write(raw)
+            return
         if self.path == "/meeting.js":
             raw = (ROOT / "meeting.js").read_bytes()
             self.send_response(200)

@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">会议室俯视座位示意图</title>
+  <desc id="desc">模拟会议室布局，中央长桌，周围十八个编号座位，上方为屏幕，下方右侧为入口。</desc>
+  <defs>
+    <linearGradient id="floor" x2="0" y2="1"><stop stop-color="#f8fbfe"/><stop offset="1" stop-color="#e9f1f8"/></linearGradient>
+    <linearGradient id="wood" x2="0" y2="1"><stop stop-color="#c99e6d"/><stop offset="1" stop-color="#a87647"/></linearGradient>
+    <filter id="shadow" x="-15%" y="-25%" width="130%" height="160%"><feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#1c3856" flood-opacity=".17"/></filter>
+    <g id="seat"><rect x="-27" y="-23" width="54" height="46" rx="12" fill="#244d78" stroke="#173a61" stroke-width="3"/><rect x="-20" y="-17" width="40" height="30" rx="9" fill="#d7e5f1"/><path d="M-17 18h34" stroke="#102e50" stroke-width="4" stroke-linecap="round"/></g>
+    <style>
+      text{font-family:PingFang SC,Hiragino Sans GB,Microsoft YaHei,Arial,sans-serif;fill:#17304a}
+      .label{font-size:20px;font-weight:700}.small{font-size:15px;fill:#50667c}.number{font-family:Arial,sans-serif;font-size:15px;font-weight:700;text-anchor:middle;fill:#113b69}
+    </style>
+  </defs>
+  <rect width="1200" height="760" fill="#e4edf7"/>
+  <rect x="68" y="76" width="1064" height="612" rx="23" fill="url(#floor)" stroke="#8ea9c3" stroke-width="7"/>
+  <path d="M88 654h930m114 0h-87" stroke="#a4b8ca" stroke-width="3"/>
+  <g opacity=".95"><rect x="97" y="145" width="22" height="155" rx="7" fill="#c5e3ee" stroke="#75a8c0"/><rect x="97" y="328" width="22" height="155" rx="7" fill="#c5e3ee" stroke="#75a8c0"/><text x="105" y="525" class="small">采光面</text></g>
+  <rect x="482" y="103" width="236" height="66" rx="11" fill="#143a63" stroke="#446f9a" stroke-width="4"/>
+  <rect x="494" y="115" width="212" height="42" rx="5" fill="#daeafa"/>
+  <text x="600" y="143" font-size="18" font-weight="700" text-anchor="middle">屏幕 / 前方</text>
+  <path d="M600 177v24m-8-9 8 9 8-9" fill="none" stroke="#53799f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="280" y="270" width="640" height="254" rx="55" fill="url(#wood)" stroke="#8b5b32" stroke-width="6" filter="url(#shadow)"/>
+  <rect x="304" y="292" width="592" height="210" rx="40" fill="none" stroke="#e0b88d" stroke-width="3"/>
+  <path d="M600 291v212" stroke="#e2bc94" stroke-width="2" stroke-dasharray="6 9"/>
+  <rect x="508" y="360" width="184" height="75" rx="15" fill="#fbf6eb" stroke="#d4b58e" stroke-width="2"/>
+  <text x="600" y="395" class="label" text-anchor="middle">会议桌</text>
+  <text x="600" y="418" class="small" text-anchor="middle">双侧座位安排</text>
+  <g><use href="#seat" x="345" y="236"/><text class="number" x="345" y="241">01</text><use href="#seat" x="430" y="236"/><text class="number" x="430" y="241">02</text><use href="#seat" x="515" y="236"/><text class="number" x="515" y="241">03</text><use href="#seat" x="600" y="236"/><text class="number" x="600" y="241">04</text><use href="#seat" x="685" y="236"/><text class="number" x="685" y="241">05</text><use href="#seat" x="770" y="236"/><text class="number" x="770" y="241">06</text><use href="#seat" x="855" y="236"/><text class="number" x="855" y="241">07</text></g>
+  <g><use href="#seat" x="345" y="559"/><text class="number" x="345" y="564">10</text><use href="#seat" x="430" y="559"/><text class="number" x="430" y="564">11</text><use href="#seat" x="515" y="559"/><text class="number" x="515" y="564">12</text><use href="#seat" x="600" y="559"/><text class="number" x="600" y="564">13</text><use href="#seat" x="685" y="559"/><text class="number" x="685" y="564">14</text><use href="#seat" x="770" y="559"/><text class="number" x="770" y="564">15</text><use href="#seat" x="855" y="559"/><text class="number" x="855" y="564">16</text></g>
+  <g><use href="#seat" x="234" y="349"/><text class="number" x="234" y="354">08</text><use href="#seat" x="234" y="446"/><text class="number" x="234" y="451">09</text><use href="#seat" x="966" y="349"/><text class="number" x="966" y="354">17</text><use href="#seat" x="966" y="446"/><text class="number" x="966" y="451">18</text></g>
+  <path d="M1023 685v-83" stroke="#f8fbfe" stroke-width="15"/><path d="M1023 685v-76a76 76 0 0 1 76 76" fill="none" stroke="#64829e" stroke-width="4"/>
+  <path d="M1040 611l24-27m-7 0h7v7" fill="none" stroke="#2c658f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="1035" y="568" class="label">入口</text>
+  <rect x="68" y="707" width="162" height="30" rx="15" fill="#173d65"/>
+  <text x="149" y="728" font-size="14" font-weight="700" fill="#fff" text-anchor="middle" style="fill:#fff">模拟俯视布局</text>
+  <text x="248" y="728" class="small">18 个编号席位仅供示意，实际座位数量和方向请以现场为准</text>
+</svg>
