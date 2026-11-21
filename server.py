@@ -105,8 +105,9 @@ class Handler(BaseHTTPRequestHandler):
             try:confidence=float(confidence)
             except (TypeError,ValueError):confidence=0
             valid_ids={x["id"] for x in candidates}
-            if match_id not in valid_ids or confidence<0.72:match_id=None
-            clarify=bool(result.get("clarify")) and match_id is None
+            possible_match=match_id in valid_ids
+            if not possible_match or confidence<0.72:match_id=None
+            clarify=(bool(result.get("clarify")) or (possible_match and confidence<0.72)) and match_id is None
             return self.send_json(200,{"match_id":match_id,"clarify":clarify,"confidence":confidence})
         if self.path=="/api/ai/workbench-intent":
             text=str(data.get("text", ""))[:4000];intent=direct_intent(text)
