@@ -13,6 +13,7 @@ const MATERIAL_LIBRARY_KEY = 'zongzhi.meeting-material-library.v1';
 let productionRun = null;
 let currentMaterialTab = '';
 let editingMeetingMaterial = '';
+let editingIntakeStep = null;
 let meetingFeedback = '';
 
 function meetingEscape(value) {
@@ -137,6 +138,7 @@ function resetMeetingSessions() {
   pauseMeetingRun();
   currentMaterialTab = '';
   editingMeetingMaterial = '';
+  editingIntakeStep = null;
   meetingFeedback = '';
 }
 
@@ -440,12 +442,93 @@ function renderMeetingLibrary(r, selected) {
   </details>`;
 }
 
+function renderIntakeFields(step, r) {
+  const f = r.facts;
+  if (step === 0) {
+    return `<div class="workflow-grid">
+      <label class="workflow-field">会议主题<input id="meetingTopic" maxlength="250" value="${meetingEscape(f.topic)}"></label>
+      <label class="workflow-field">会议室<input id="meetingRoom" maxlength="250" value="${meetingEscape(f.location)}"></label>
+      <label class="workflow-field">会议日期<input id="meetingDate" type="date" value="${meetingEscape(f.date)}"></label>
+      <label class="workflow-field">会议时间<input id="meetingTime" type="time" value="${meetingEscape(f.time)}"></label>
+    </div>`;
+  }
+  if (step === 1) {
+    return `<label class="workflow-field intake-person-count">参会人数（可选）
+      <input id="meetingCount" type="number" min="1" max="100" value="${meetingEscape(f.attendee_count)}">
+    </label>${renderMeetingAttendees(r)}`;
+  }
+  return `<div class="workflow-grid">
+    <label class="workflow-field">是否用餐<select id="mealRequired">
+      <option value="">待确认</option>
+      <option value="yes" ${r.meal.required === true ? 'selected' : ''}>用餐</option>
+      <option value="no" ${r.meal.required === false ? 'selected' : ''}>不用餐</option>
+    </select></label>
+    <label class="workflow-field" id="dietField" ${r.meal.required === true ? '' : 'hidden'}>特殊餐饮需求
+      <input id="mealDiet" maxlength="500" value="${meetingEscape(r.meal.special_diet)}" placeholder="如有清真、忌口等要求请填写；没有请填“无”">
+    </label>
+  </div>`;
+}
+
+function renderMeetingIntake(r, steps, startAction, productionVisible) {
+  const next = steps.findIndex(step => step.missing.length > 0);
+  const stepIndex = editingIntakeStep ?? next;
+  const isEditing = editingIntakeStep !== null;
+  const step = steps[stepIndex];
+  const previousForm = $('meetingIntakeFields');
+  const keepOpen = previousForm?.dataset.step === String(stepIndex) && previousForm.open;
+  const f = r.facts;
+  const summaries = [
+    [f.topic, f.date, f.time, f.location].filter(Boolean).join(' · '),
+    r.participants.map(person => person.name).filter(Boolean).slice(0, 3).join('、') + ' · ' + r.participants.length + ' 人',
+    r.meal.required ? ('用餐 · ' + (r.meal.special_diet === '无' ? '无特殊要求' : r.meal.special_diet)) : '不用餐',
+  ];
+  const prompts = [
+    '您可以把会议主题、时间和地点直接告诉赛博小潘。',
+    '您可以直接贴名单，或从访客库选取曾来访的人员。',
+    '请告诉我是否安排用餐。有特殊要求的话，也可以一起说明。',
+  ];
+  const confirmed = steps.map((item, index) => {
+    if (item.missing.length || (isEditing && index === stepIndex)) return '';
+    return `<li class="intake-confirmed">
+      <span class="meeting-step-number intake-check" aria-label="已确认">✓</span>
+      <div><strong>${index + 1} · ${item.title}</strong><p>${meetingEscape(summaries[index])}</p></div>
+      <button type="button" class="workflow-btn intake-edit" data-intake-step="${index}" aria-label="修改${item.title}">修改</button>
+    </li>`;
+  }).join('');
+  return `<section class="workflow-card">
+    <div class="meeting-section-head"><h3>会议信息收集</h3>
+      <span class="meeting-section-meta">${next < 0 ? '资料齐全' : '第 ' + (stepIndex + 1) + ' 步'}</span>
+    </div>
+    ${confirmed ? `<ol class="meeting-step-list intake-confirmed-list" aria-label="已确认的信息">${confirmed}</ol>` : ''}
+    ${step ? `<div class="intake-current">
+      <div class="intake-current-heading"><span class="meeting-step-number">${stepIndex + 1}</span>
+        <strong>${step.title}</strong></div>
+      ${!isEditing ? `<p>${prompts[stepIndex]}</p>
+        ${stepIndex === 0 && summaries[0] ? `<p class="intake-captured">已填：${meetingEscape(summaries[0])}</p>` : ''}` : ''}
+      <details class="meeting-intake-fields" id="meetingIntakeFields" data-step="${stepIndex}" ${isEditing || keepOpen ? 'open' : ''}>
+        <summary>${isEditing ? '修改已确认信息' : '手动补充'}</summary>
+        <div class="meeting-intake-body">
+          ${renderIntakeFields(stepIndex, r)}
+          <div class="workflow-actions">
+            <button type="button" class="workflow-btn primary" data-meeting-action="save-intake">保存${step.title.replace('信息','')}</button>
+            ${isEditing ? '<button type="button" class="workflow-btn" data-meeting-action="cancel-intake-edit">返回当前步骤</button>' : ''}
+          </div>
+        </div>
+      </details>
+    </div>` : !productionVisible ? `<div class="intake-ready" role="status">
+      <p>会议信息已收齐。准备好后，可以开始制作材料。</p>
+      ${startAction}
+    </div>` : ''}
+  </section>`;
+}
+
 function renderMeetingWorkflow() {
   const r = getMeetingRecord();
   if (!r) return;
   const root = $('meetingWorkflow');
   const intake = meetingIntake(r);
-  const ready = meetingReady(r);
+  const ready = intake.every(step => !step.missing.length);
+  const productionVisible = ready && r.production.started;
   const next = meetingNextMaterial(r);
   const runningKey = productionRun?.key;
   const completed = MEETING_ITEMS.filter(([key]) => r.materials[key] && (key !== 'dining_plan' || r.meal.required));
@@ -456,14 +539,13 @@ function renderMeetingWorkflow() {
   const visitorOpen = root.querySelector('.visitor-directory')?.open;
   const libraryQuery = $('meetingLibraryQuery')?.value;
   const libraryType = $('meetingLibraryType')?.value;
-  const info = r.facts;
   const disabled = busy || editing ? 'disabled' : '';
   const needsLanguage = ready && r.production.started && r.production.tentAsked && next === 'table_tents' && !r.tentLanguage;
   const currentAction = ready && next && !productionRun && !needsLanguage
     ? `<button type="button" class="workflow-btn primary" data-meeting-action="start" ${disabled}>${r.production.started || r.production.needsResume ? '继续制作' : '开始制作'}</button>` : '';
-  const title = ready && !next ? '全部材料已完成' : runningKey ? '正在制作 ' + MATERIAL_TITLES[runningKey]
+  const title = !ready ? '收集中' : !next ? '全部材料已完成' : runningKey ? '正在制作 ' + MATERIAL_TITLES[runningKey]
     : needsLanguage ? '请确认桌签语言' : r.production.started ? '制作已暂停'
-      : ready ? '资料已收齐，等待确认' : '收集中';
+      : '资料已收齐，等待确认';
   $('resultState').textContent = title;
   $('resultState').classList.toggle('ready', ready && !next);
   $('resultDescription').textContent = r.facts.topic || '新会议';
@@ -472,41 +554,8 @@ function renderMeetingWorkflow() {
   $('resultRequest').hidden = true;
   root.hidden = false;
   root.innerHTML = `
-    <section class="workflow-card">
-      <div class="meeting-section-head">
-        <h3>会议信息收集</h3>
-        <span class="meeting-section-meta">${intake.filter(step => !step.missing.length).length} / 3 已完成</span>
-      </div>
-      <ol class="meeting-step-list">${intake.map((step, index) => `<li title="${meetingEscape(step.requirement)}">
-        <span class="meeting-step-number">${index + 1}</span><div><strong>${step.title}</strong>
-        ${step.missing.length ? `<p>${meetingEscape(step.missing.join('、'))}</p>` : `<p>${meetingEscape([
-          [info.date, info.time, info.location].filter(Boolean).join(' · '),
-          `已登记 ${r.participants.length} 人`,
-          r.meal.required ? (r.meal.special_diet === '无' ? '用餐 · 无特殊要求' : '用餐 · 已登记餐饮要求') : '不用餐',
-        ][index])}</p>`}</div>
-        <span class="meeting-step-status ${step.missing.length ? '' : 'done'}">${step.missing.length ? '待完成' : '已完成'}</span>
-      </li>`).join('')}</ol>
-      <details class="meeting-intake-fields" ${$('meetingIntakeFields')?.open ? 'open' : ''} id="meetingIntakeFields">
-        <summary>手动填写或修改</summary><div class="meeting-intake-body">
-        <div class="workflow-grid">
-          <label class="workflow-field">会议主题<input id="meetingTopic" maxlength="250" value="${meetingEscape(info.topic)}"></label>
-          <label class="workflow-field">会议室<input id="meetingRoom" maxlength="250" value="${meetingEscape(info.location)}"></label>
-          <label class="workflow-field">会议日期<input id="meetingDate" type="date" value="${meetingEscape(info.date)}"></label>
-          <label class="workflow-field">会议时间<input id="meetingTime" type="time" value="${meetingEscape(info.time)}"></label>
-          <label class="workflow-field">参会人数（可选）<input id="meetingCount" type="number" min="1" max="100" value="${meetingEscape(info.attendee_count)}"></label>
-          <label class="workflow-field">是否用餐<select id="mealRequired">
-            <option value="">待确认</option><option value="yes" ${r.meal.required === true ? 'selected' : ''}>用餐</option>
-            <option value="no" ${r.meal.required === false ? 'selected' : ''}>不用餐</option>
-          </select></label>
-          <label class="workflow-field" id="dietField" ${r.meal.required === true ? '' : 'hidden'}>特殊餐饮需求
-            <input id="mealDiet" maxlength="500" value="${meetingEscape(r.meal.special_diet)}" placeholder="清真、忌口；无特殊需求请填“无”">
-          </label>
-        </div>
-        ${renderMeetingAttendees(r)}
-        <div class="workflow-actions"><button type="button" class="workflow-btn" data-meeting-action="save-intake">保存会议信息</button></div></div>
-      </details>
-    </section>
-    <section class="workflow-card">
+    ${renderMeetingIntake(r, intake, currentAction, productionVisible)}
+    ${productionVisible ? `    <section class="workflow-card">
       <div class="meeting-section-head"><h3>会议材料制作</h3>
         <span class="meeting-section-meta">${completed.length} / ${r.meal.required === false ? 5 : 6} 已完成</span></div>
       <ol class="meeting-step-list production">${MEETING_ITEMS.map(([key, label], index) => {
@@ -543,12 +592,13 @@ function renderMeetingWorkflow() {
         <button type="button" class="workflow-btn primary" data-meeting-action="download">下载</button>
       </div>` : ''}
     </section>` : ''}
+    ${renderMeetingLibrary(r, selected)}` : ''}
     <p class="workflow-hint" id="meetingFeedback" role="status" ${meetingFeedback ? '' : 'hidden'}>${meetingEscape(meetingFeedback)}</p>
-    ${renderMeetingLibrary(r, selected)}
   `;
-  if (libraryOpen) $('meetingMaterialLibrary').open = true;
-  if (visitorOpen) root.querySelector('.visitor-directory').open = true;
-  if (libraryQuery !== undefined) {
+  if (libraryOpen && $('meetingMaterialLibrary')) $('meetingMaterialLibrary').open = true;
+  const visitorDirectory = root.querySelector('.visitor-directory');
+  if (visitorOpen && visitorDirectory) visitorDirectory.open = true;
+  if (libraryQuery !== undefined && $('meetingLibraryQuery')) {
     $('meetingLibraryQuery').value = libraryQuery;
     if ([...$('meetingLibraryType').options].some(option => option.value === libraryType)) $('meetingLibraryType').value = libraryType;
     refreshMeetingLibrary();
@@ -556,14 +606,16 @@ function renderMeetingWorkflow() {
 }
 
 function readMeetingIntake(r) {
-  if (!$('meetingTopic')) return;
   for (const [field, id] of Object.entries({
     topic: 'meetingTopic', location: 'meetingRoom', date: 'meetingDate', time: 'meetingTime', attendee_count: 'meetingCount',
   })) {
-    const value = $(id).value.trim();
+    const input = $(id);
+    if (!input) continue;
+    const value = input.value.trim();
     if (value) r.facts[field] = value;
     else delete r.facts[field];
   }
+  if (!$('mealRequired')) return;
   const meal = $('mealRequired').value;
   r.meal.required = meal ? meal === 'yes' : null;
   r.meal.special_diet = meal === 'yes' ? $('mealDiet').value.trim() : '';
@@ -581,7 +633,7 @@ function updateMeetingIntake(r, changeAttendees) {
     makeMessage('会议信息已更新。请问是否按更新后的信息继续制作？', 'assistant');
   } else if (wasRunning) {
     makeMessage('已暂停制作，请确认是否继续。', 'assistant');
-  } else {
+  } else if (editingIntakeStep === null) {
     askMeetingStart(r);
   }
   renderMeetingWorkflow();
@@ -644,7 +696,11 @@ function initMeetingWorkflow() {
     const r = getMeetingRecord();
     if (!r) return;
     const d = button.dataset;
-    if (d.materialTab) {
+    if (d.intakeStep !== undefined) {
+      editingIntakeStep = Number(d.intakeStep);
+      renderMeetingWorkflow();
+      $('meetingIntakeFields')?.querySelector('summary').focus();
+    } else if (d.materialTab) {
       currentMaterialTab = d.materialTab;
       renderMeetingWorkflow();
     } else if (d.editMaterial) {
@@ -671,6 +727,8 @@ function initMeetingWorkflow() {
       persistMeetingRecord(r);
       runMeetingProduction();
     } else if (d.removeAttendee !== undefined) {
+      if (busy) return;
+      editingIntakeStep = 1;
       updateMeetingIntake(r, list => list.splice(Number(d.removeAttendee), 1));
     } else if (d.useVisitor) {
       const visitor = meetingArray(VISITOR_KEY).find(entry => entry.key === d.useVisitor);
@@ -701,13 +759,20 @@ function initMeetingWorkflow() {
         return;
       }
       const prior = meetingArray(VISITOR_KEY).find(v => v.name === name && v.company === company);
+      if (busy) return;
+      editingIntakeStep = 1;
       updateMeetingIntake(r, list => {
         if (!list.some(p => p.type === type && p.name === name && p.company === company)) {
           list.push({type, company, name, title, english_name: prior?.english_name || ''});
         }
       });
     } else if (d.meetingAction === 'save-intake') {
+      if (busy) return;
+      editingIntakeStep = null;
       updateMeetingIntake(r);
+    } else if (d.meetingAction === 'cancel-intake-edit') {
+      editingIntakeStep = null;
+      renderMeetingWorkflow();
     } else if (d.meetingAction === 'start') {
       makeMessage(r.production.started || r.production.needsResume ? '请继续制作。' : '请开始制作会议材料。', 'user');
       runMeetingProduction();
