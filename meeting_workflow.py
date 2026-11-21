@@ -1,4 +1,7 @@
 """Meeting intake checks and the ordered material catalog."""
+from datetime import date, timedelta
+import re
+
 from meeting_export import pdf_document, word_document
 
 MATERIALS = {
@@ -59,3 +62,72 @@ def export_bundle(profile, materials, file_format):
     if file_format == "pdf":
         return pdf_document(sections), "application/pdf"
     return word_document(sections), "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def extract_meeting_basics(text, reference_day):
+    """Extract explicitly stated basics, keeping names and attendee text out of this path."""
+    text = re.split(r"来访人员|参会人员|参会名单|外部来宾", text, maxsplit=1)[0][:700]
+    if re.search(r"举个例子|举例|如果|假设|不在|不开|不召开|是否|能不能", text):
+        return {}
+    if not re.search(r"会议|交流会|座谈会|评审会|研讨会|(?:召开|举行|举办)", text):
+        return {}
+    facts = {}
+    date_match = re.search(r"(?<!\d)(?:(\d{4})(?:年|[-/]))?(\d{1,2})(?:月|[-/])(\d{1,2})(?:日|号)?(?!\d)", text)
+    try:
+        if date_match:
+            year = int(date_match[1]) if date_match[1] else reference_day.year
+            facts["date"] = date(year, int(date_match[2]), int(date_match[3])).isoformat()
+        else:
+            relative = re.search(r"今天|今日|明天|明日|后天|昨天", text)
+            if relative:
+                days = {"今天": 0, "今日": 0, "明天": 1, "明日": 1, "后天": 2, "昨天": -1}
+                facts["date"] = (reference_day + timedelta(days=days[relative[0]])).isoformat()
+    except ValueError:
+        pass
+
+    time_expression = re.search(
+        r"(凌晨|早上|上午|中午|下午|傍晚|晚上)?\s*"
+        r"(?<![0-9])([0-9]{1,2}|[零一二两三四五六七八九十]{1,3})"
+        r"(?:[:：]([0-9]{2})(?![0-9])|(?:点|时(?=半|[0-9零一二两三四五六七八九十]|[，,。；;\s]|$))(半|[0-9]{1,2}|[零一二两三四五六七八九十]{1,3})?分?)",
+        text,
+    )
+    if time_expression:
+        period, hour_text, clock_minutes, spoken_minutes = time_expression.groups()
+        hour = chinese_number(hour_text)
+        minute = 30 if spoken_minutes == "半" else chinese_number(clock_minutes or spoken_minutes or "0")
+        if period in ("下午", "傍晚", "晚上") and 1 <= hour < 12:
+            hour += 12
+        elif period == "中午" and 1 <= hour <= 2:
+            hour += 12
+        elif period == "凌晨" and hour == 12:
+            hour = 0
+        if 0 <= hour < 24 and 0 <= minute < 60:
+            facts["time"] = f"{hour:02d}:{minute:02d}"
+
+    room = re.search(r"(?<![A-Za-z0-9])([A-Za-z]?\d{1,6}(?:[-–]\d{1,4})?\s*(?:号\s*)?会议室)", text)
+    if not room:
+        room = re.search(r"(?:地点|会议室)\s*[:：]\s*([^，,。；;\n]{1,35})", text)
+    if room:
+        facts["location"] = room[1].strip()
+
+    topic = re.search(r"(?:会议主题|主题)\s*[:：]\s*([^，,。；;\n]{1,80})", text)
+    if not topic:
+        topic = re.search(r"(?:召开|举行|举办)\s*([^，,。；;\n]{1,70}?(?:会议(?!室)|交流会|座谈会|评审会|研讨会))", text)
+    if topic:
+        name = topic[1].strip(' “”。"《》')
+        if name and re.sub(r"(?:会议|交流会|座谈会|评审会|研讨会)$", "", name).strip():
+            facts["topic"] = name
+    if not ("topic" in facts or "location" in facts or re.search(r"会议(?:日期|时间)|开会时间", text)):
+        return {}
+    return facts
+
+
+def chinese_number(value):
+    if value.isascii() and value.isdecimal():
+        return int(value)
+    digits = {key: digit for digit, key in enumerate("零一二三四五六七八九")}
+    digits["两"] = 2
+    if "十" in value:
+        tens, ones = value.split("十", 1)
+        return digits.get(tens, 1) * 10 + digits.get(ones, 0)
+    return int("".join(str(digits[char]) for char in value))
