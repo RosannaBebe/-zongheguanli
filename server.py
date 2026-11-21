@@ -21,14 +21,30 @@ MODEL=os.getenv("SEI_MODEL","DeepSeek-V4-Flash")
 API_KEY=os.getenv("SEI_API_KEY","")
 PORT=int(os.getenv("PORT","8765"))
 ASSISTANTS={"meeting":"会务助手","information":"政务信息助手","official_document":"公文助手","knowledge":"综合知识库"}
+BASE_PERSONA="【共同服务定位】你是国企性质工程设计院综合管理部的智能服务助手，服务对象包括院领导和各级管理人员。无论当前用户的职位如何，一律把用户作为重要领导服务对象对待，具有很强的服务意识：态度端正、谦逊有礼、积极主动、周到细致，始终使用‘您’等尊称，不使用随意、命令式或怠慢的表达；准确领会指示，主动梳理要点、提醒缺项、复核关键信息，并优先交付可直接审阅或使用的成果。保持稳重、专业、响应及时，不夸大、不谄媚、不堆砌客套话，也不替领导擅自作决定。已确认事项持续沿用，用户最新明确意见优先。不得虚构事实、制度依据、来源或已执行的现实操作。"
+ASSISTANT_TASKS={
+ "meeting":"你是会务助手，任务是围绕单次会议协助筹备并持续更新会议资料。一次会议是一条独立记录。首先确认会议名称/主题；如果没有明确名称，先礼貌询问名称，不要立即生成正式材料。收集并维护会议目的、日期时间、地点、主办方、参会对象与人数、议程、主持人、会务分工、材料和格式要求。根据需求制作或更新会议通知、议程、参会名单、主持词、座次/签到安排、欢迎屏文案、会议纪要模板等。每次用户补充或更改信息，都要更新会议档案，并主动说明哪些已有材料需要重生成。尤其要把参会人数等变化覆盖旧值（例如8人改为10人），其余已确认信息继续沿用。用户再次提出类似会议时，优先沿用匹配的旧记录，不创建重复会议。涉及时间、人数、地点等关键信息时，主动复核；尊重用户安排，不代替用户确认或通知参会人。只在用户提供信息和档案范围内工作。回复必须是JSON对象：{\"reply\":\"面向用户的中文回复\",\"meeting\":{\"name\":\"会议名称\",\"facts\":{\"purpose\":\"\",\"date\":\"\",\"time\":\"\",\"location\":\"\",\"attendee_count\":\"\",\"attendees\":\"\",\"agenda\":\"\",\"host\":\"\",\"materials\":\"\",\"notes\":\"\"}}}。未知字段留空字符串；不要在JSON外添加文字。",
+ "information":"你是政务信息助手，帮助搜集和梳理政务要情、核验来源、提炼观点并整理专报。明确主题、时间范围、地域、受众和来源要求；区分事实、判断与建议，标注待核实内容，不编造新闻、数据或出处。",
+ "official_document":"你是公文助手，协助起草、润色、校对和规范公文。先确认文种、标题、主送对象、目的、依据、关键事实和篇幅；保留用户提供的事实，不擅自杜撰政策依据或发文信息，并清楚呈现可直接使用的正文和需要确认的字段。",
+ "knowledge":"你是综合知识库助手，帮助查找制度、模板、历史案例和会务/政务/公文材料。只依据本次对话及用户提供的知识材料回答；材料不足时明确说明并询问上传或补充资料，不虚构制度条款、来源或历史记录。"
+}
+
+def parse_json_object(text:str):
+    match=re.search(r"\{.*\}",text,re.S)
+    if not match:return None
+    try:
+        value=json.loads(match.group())
+        return value if isinstance(value,dict) else None
+    except Exception:return None
 
 def direct_intent(text:str)->str:
-    # Explicit assistant requests always win. Lookup language then routes historical material to the knowledge base.
+    # Explicit assistant requests and references to prior meetings route to their dedicated assistant first.
     if re.search(r"打开.{0,8}会务助手|进入.{0,8}会务助手|会务助手",text): return "meeting"
     if re.search(r"打开.{0,10}(政务信息助手|信息助手)|进入.{0,10}(政务信息助手|信息助手)|政务信息助手",text): return "information"
     if re.search(r"打开.{0,8}公文助手|进入.{0,8}公文助手|公文助手",text): return "official_document"
     if re.search(r"打开.{0,10}(综合知识库|知识库)|进入.{0,10}(综合知识库|知识库)|综合知识库",text): return "knowledge"
-    if re.search(r"(查询|查找|查阅|搜一下|历史|以前|制度|模板|案例)",text) and re.search(r"(会议|会务|公文|信息|资料|要情|制度|模板|案例)",text): return "knowledge"
+    if re.search(r"(之前|上次|刚才|原来|那场|这场|继续|接着|讨论过|已经聊过).{0,12}(会议|会务|参会|人数|材料)|(会议|会务).{0,10}(改成|调整|更新|继续|接着|之前|上次)",text): return "meeting"
+    if re.search(r"(查询|查找|查阅|搜一下|历史|以前|制度|模板|案例)",text) and re.search(r"(会议制度|会务制度|会议模板|会议案例|公文|信息|资料|要情|制度|模板|案例)",text): return "knowledge"
     if re.search(r"知识库",text): return "knowledge"
     if re.search(r"办会|办个会|开会|会议|会务|参会|会议室|会场",text): return "meeting"
     if re.search(r"要情|专报|新闻|信息稿|搜集.{0,4}信息",text): return "information"
@@ -68,6 +84,30 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try: data=self.read_json()
         except Exception as exc: return self.send_json(400,{"error":str(exc)})
+        if self.path=="/api/meeting/match":
+            text=str(data.get("text",""))[:2000]
+            meetings=data.get("meetings",[])
+            if not isinstance(meetings,list):meetings=[]
+            candidates=[]
+            for item in meetings[:40]:
+                if not isinstance(item,dict):continue
+                source_facts=item.get("facts",{}) if isinstance(item.get("facts"),dict) else {}
+                facts={str(k):str(v)[:240] for k,v in source_facts.items() if k in {"purpose","date","time","location","attendee_count","agenda"}}
+                recent=item.get("messages",[]) if isinstance(item.get("messages"),list) else []
+                recent=[str(m)[:240] for m in recent[-8:] if isinstance(m,str)]
+                candidates.append({"id":str(item.get("id",""))[:100],"name":str(item.get("name",""))[:200],"title":str(item.get("title",""))[:200],"facts":facts,"recent_user_messages":recent})
+            if not candidates or not API_KEY:return self.send_json(200,{"match_id":None,"clarify":False})
+            matcher="判断新需求是否是对已有会议的继续沟通。相同会议名称/主题/日期，即使参会人数、时间、地点等信息改变，也应匹配原会议；不得因人数变更而新建会议。若输入很笼统或无法确认是哪场会议，应要求用户从列表选择，返回clarify=true。若能确定是新会议，返回clarify=false且match_id=null。只能从候选列表中选择id，绝不编造id。只返回JSON：{\"match_id\":null或候选id,\"confidence\":0到1,\"clarify\":true或false}。候选数据："+json.dumps(candidates,ensure_ascii=False)
+            answer=llm([{"role":"system","content":matcher},{"role":"user","content":text}],180)
+            result=parse_json_object(answer) or {}
+            match_id=result.get("match_id")
+            confidence=result.get("confidence",0)
+            try:confidence=float(confidence)
+            except (TypeError,ValueError):confidence=0
+            valid_ids={x["id"] for x in candidates}
+            if match_id not in valid_ids or confidence<0.72:match_id=None
+            clarify=bool(result.get("clarify")) and match_id is None
+            return self.send_json(200,{"match_id":match_id,"clarify":clarify,"confidence":confidence})
         if self.path=="/api/ai/workbench-intent":
             text=str(data.get("text", ""))[:4000];intent=direct_intent(text)
             if not intent and API_KEY:
@@ -83,13 +123,28 @@ class Handler(BaseHTTPRequestHandler):
             key=data.get("assistant");messages=data.get("messages",[])
             if key not in ASSISTANTS:return self.send_json(400,{"error":"助手类型无效"})
             if not isinstance(messages,list) or not messages:return self.send_json(400,{"error":"请先输入需求"})
-            system=("你是综智助手中的%s，使用简洁、清楚的中文与用户协作。先理解目标，缺少关键信息时提出具体问题；能完成的工作直接给出草稿、清单或结果。不要声称已执行现实世界操作。涉及知识库时，只能基于用户提供的材料回答，不得伪造制度、来源或历史记录。将完整可交付内容直接写在答复中。"%ASSISTANTS[key])
+            system=BASE_PERSONA+"\n\n当前助手："+ASSISTANTS[key]+"。\n任务要求："+ASSISTANT_TASKS[key]
+            meeting_memory=data.get("meeting_memory")
+            if key=="meeting" and isinstance(meeting_memory,dict):
+                memory={"name":str(meeting_memory.get("name",""))[:200],"facts":meeting_memory.get("facts",{}) if isinstance(meeting_memory.get("facts"),dict) else {}}
+                system+="\n\n本次会议的持久档案（沿用已确认信息；如果用户明确更正，必须用新值覆盖旧值）：\n"+json.dumps(memory,ensure_ascii=False)[:5000]
             clean=[]
-            for m in messages[-20:]:
+            for m in messages[-30:]:
+                if not isinstance(m,dict):continue
                 role=m.get("role");content=m.get("text","")
                 if role in ("user","assistant") and isinstance(content,str):clean.append({"role":role,"content":content[:6000]})
             if not clean:return self.send_json(400,{"error":"对话内容为空"})
             reply=llm([{"role":"system","content":system}]+clean)
+            if key=="meeting":
+                result=parse_json_object(reply) or {}
+                text_reply=result.get("reply")
+                meeting=result.get("meeting",{}) if isinstance(result.get("meeting"),dict) else {}
+                facts=meeting.get("facts",{}) if isinstance(meeting.get("facts"),dict) else {}
+                allowed={"purpose","date","time","location","attendee_count","attendees","agenda","host","materials","notes"}
+                facts={name:str(value)[:1000] for name,value in facts.items() if name in allowed and value not in (None,"")}
+                meeting_name=str(meeting.get("name", ""))[:200]
+                if not isinstance(text_reply,str) or not text_reply:text_reply=reply
+                return self.send_json(200,{"reply":text_reply,"artifact":text_reply,"meeting":{"name":meeting_name,"facts":facts}})
             return self.send_json(200,{"reply":reply,"artifact":reply})
         return self.send_json(404,{"error":"未找到接口"})
 
