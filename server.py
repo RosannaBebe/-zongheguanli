@@ -17,7 +17,8 @@ def load_dotenv():
         os.environ.setdefault(key.strip(),value.strip().strip("\"'"))
 load_dotenv()
 BASE_URL=os.getenv("SEI_BASE_URL","https://opendigital.sei.com.cn/v1").rstrip("/")
-MODEL=os.getenv("SEI_MODEL","DeepSeek-V4-Flash")
+MODEL=os.getenv("SEI_MODEL","DeepSeek-V4.1-Flash")
+FALLBACK_MODELS=[name.strip() for name in os.getenv("SEI_FALLBACK_MODELS","Qwen3.8-27B,DeepSeek-V4-Flash,DeepSeek-V4-Pro").split(",") if name.strip()]
 API_KEY=os.getenv("SEI_API_KEY","")
 PORT=int(os.getenv("PORT","8765"))
 ASSISTANTS={"meeting":"会务助手","information":"政务信息助手","official_document":"公文助手","knowledge":"综合知识库"}
@@ -70,17 +71,27 @@ def direct_intent(text:str)->str:
 
 def llm(messages, max_tokens=1200):
     if not API_KEY: raise RuntimeError("服务端未设置 SEI_API_KEY")
-    payload=json.dumps({"model":MODEL,"messages":messages,"temperature":0.3,"max_tokens":max_tokens}).encode()
-    req=urllib.request.Request(BASE_URL+"/chat/completions",data=payload,headers={"Authorization":"Bearer "+API_KEY,"Content-Type":"application/json"},method="POST")
-    try:
-        with urllib.request.urlopen(req,timeout=90) as response: data=json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail=exc.read(1200).decode("utf-8","replace")
-        raise RuntimeError("模型服务返回 HTTP %s：%s"%(exc.code,detail[:500])) from None
-    except Exception as exc:
-        raise RuntimeError("连接模型服务失败："+str(exc)) from None
-    try: return data["choices"][0]["message"]["content"]
-    except (KeyError,IndexError,TypeError): raise RuntimeError("模型服务返回格式无法识别") from None
+    models=list(dict.fromkeys([MODEL]+FALLBACK_MODELS))
+    last_error="模型服务返回格式无法识别"
+    for index,model in enumerate(models):
+        request_messages=[dict(message) for message in messages]
+        if request_messages and request_messages[0].get("role")=="system":
+            request_messages[0]["content"]+="\n\n本次实际调用模型名称："+model+"。如果用户询问模型，请如实回答这个名称。"
+        payload=json.dumps({"model":model,"messages":request_messages,"temperature":0.3,"max_tokens":max_tokens}).encode()
+        req=urllib.request.Request(BASE_URL+"/chat/completions",data=payload,headers={"Authorization":"Bearer "+API_KEY,"Content-Type":"application/json"},method="POST")
+        try:
+            with urllib.request.urlopen(req,timeout=90) as response: data=json.loads(response.read().decode("utf-8"))
+            return data["choices"][0]["message"]["content"]
+        except urllib.error.HTTPError as exc:
+            detail=exc.read(1200).decode("utf-8","replace")
+            last_error="模型 %s 返回 HTTP %s：%s"%(model,exc.code,detail[:500])
+            if exc.code not in (400,404,408,422,429,500,502,503,504) or index==len(models)-1:break
+        except (KeyError,IndexError,TypeError,ValueError) as exc:
+            last_error="模型 %s 返回格式无法识别：%s"%(model,str(exc)[:180])
+            if index==len(models)-1:break
+        except Exception as exc:
+            raise RuntimeError("连接模型服务失败："+str(exc)) from None
+    raise RuntimeError(last_error)
 
 class Handler(BaseHTTPRequestHandler):
     server_version="Zongzhi/1.0"
@@ -92,7 +103,7 @@ class Handler(BaseHTTPRequestHandler):
         if n>1_000_000: raise ValueError("请求内容过大")
         return json.loads(self.rfile.read(n) or b"{}")
     def do_GET(self):
-        if self.path=="/api/ai/status": return self.send_json(200,{"configured":bool(API_KEY),"model":MODEL,"base_url":BASE_URL})
+        if self.path=="/api/ai/status": return self.send_json(200,{"configured":bool(API_KEY),"model":MODEL,"fallback_models":FALLBACK_MODELS,"base_url":BASE_URL})
         if self.path in ("/health","/healthz"): return self.send_json(200,{"ok":True})
         # Single-page app: all module paths serve the same front end.
         if self.path.split("?",1)[0] in ("/","/meeting","/information","/official-documents","/knowledge"):
@@ -128,9 +139,6 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200,{"match_id":match_id,"clarify":clarify,"confidence":confidence})
         if self.path=="/api/ai/workbench-intent":
             text=str(data.get("text", ""))[:4000]
-            intent=direct_intent(text)
-            if intent:
-                return self.send_json(200,{"intent":intent,"confidence":1,"reply":"好的，这件事我来为您接续安排。","handoff_summary":text,"shared_memory_patch":{"facts":[],"preferences":[]}})
             turns=data.get("messages",[])
             if not isinstance(turns,list):turns=[]
             clean=[]
