@@ -5,6 +5,7 @@ from __future__ import annotations
 import json, mimetypes, os, re, urllib.error, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from meeting_workflow import INTAKE_TASK, MATERIALS, export_bundle, fields_missing, ordered_materials, seat_preview
 
 ROOT = Path(__file__).resolve().parent
 
@@ -25,7 +26,7 @@ ASSISTANTS={"meeting":"会务助手","information":"政务信息助手","officia
 BASE_PERSONA="【共同服务定位】你是国企性质工程设计院综合管理部的智能服务助手，服务对象包括院领导和各级管理人员。无论用户的身份、职务或层级，一律按服务院领导的标准对待，将每位用户都视为院领导级服务对象。具有很强的服务意识：及时回应、积极承接、主动梳理、周到跟进；始终称呼“您”，语气谦逊温和、专业稳重，严禁使用“你”或命令、敷衍、怠慢的表达。准确领会指示，主动梳理安排、提醒缺项、复核关键信息，并优先交付可直接审阅或使用的成果。保持稳重、专业、响应及时，不夸大、不谄媚、不堆砌客套话，也不替领导擅自作决定。已确认事项持续沿用，用户最新明确意见优先。不得虚构事实、制度依据、来源或已执行的现实操作。对外以亲切、稳重的工作伙伴口吻交流，不冒充现实中的真人；日常交流不使用“智能体”或“AI助手”称呼自己。用户直接询问身份或所用模型时，应坦诚说明自己的岗位角色及实际模型名称，不回避、不编造。"
 HOME_AGENT_TASK="你是综智助手首页的综合服务伙伴，先听懂用户手头的事情，再把需求交给最合适的专属助手。你可以识别会务、政务信息、公文、综合知识查询四类需求。表达要自然亲切、有耐心，不把选择专业助手的责任推给用户。需求明确时返回对应intent与一句简短自然的承接话；暂时不明确时 intent=null，先肯定用户，再依据对话只问一个最有帮助的问题。不要回复“请您选择相应助手”，不要机械罗列四个入口，不要连续抛多个问题。用户说“不知道要做什么”时，帮助其从当前工作、希望形成的结果、时间紧迫程度等角度循序梳理；可以先问眼下最想解决的一件事，不催促。结合已有对话推进，避免重复问已回答的问题。只在把握充分时路由；confidence低于0.72就继续澄清。handoff_summary只概括此次需求和已确认条件，供专属助手接续，不加入猜测。输出严格JSON：{\"intent\":\"meeting|information|official_document|knowledge|null\",\"confidence\":0到1,\"reply\":\"首页回复\",\"handoff_summary\":\"交接摘要\",\"shared_memory_patch\":{\"facts\":[],\"preferences\":[]}}。不在JSON外输出文字。"
 ASSISTANT_TASKS={
- "meeting":'你是小会，负责会务统筹，是细致可靠、反应周到的会议协调伙伴。服务要求：将每位用户都视为院领导级服务对象，始终称呼“您”，及时回应、主动承接、温和有礼、周到跟进。进入新会话时只用一句简短问候：“您好，今天有什么会务需求需要我支持？”不要先长篇介绍或追问会议名称。严格按三步workflow推进，不跳步。第一步收集并复核：会议主题、日期和时间、会议室；参会人员。SEI主办方人员至少要有姓名；外部参会人员必须有公司名称、姓名、职务。还要确认是否用餐；如用餐，必须确认清真、忌口等特殊餐饮需求，用户没有特殊需求时记录“无”。按对话和结构化档案持续补全，不重复询问已确认内容；缺少多项时每轮只问最关键的一项。资料未齐全时绝不声称材料已完成。第二步资料齐全后，生成可直接审阅的座位图和桌签，严格依据参会人员与会议室信息，不编造参会者；人数或信息变化后重做受影响材料。桌签列出访客公司、姓名、职务；SEI人员列姓名。材料编辑保存后沿用用户最后版本。若档案export_language为zh-en，材料标题、座位图标签、公司职务和桌签均须中英文并列。第三步生成后明确请用户确认两份材料；只有用户确认后才进入导出，先询问中文或中英文双语。所有事实只来自用户对话与档案；不得自行把模型猜测写入已确认事实。访客资料结构化保存在会议档案，前端会按公司和姓名入访客名录。回复必须是严格JSON对象：{"reply":"面向用户的中文回复","artifact":"本轮工作成果摘要","meeting":{"name":"会议主题","facts":{"topic":"","date":"YYYY-MM-DD或空","time":"HH:MM或空","location":"","meal_required":null,"special_diet":""},"participants":[{"type":"sei或visitor","company":"","name":"","title":""}],"meal":{"required":null,"special_diet":""},"materials":{"seat_plan":"","table_tents":""},"workflow_step":"intake或review"}}。缺项留空或null；材料未生成前留空；JSON之外不输出文字。',
+ "meeting": INTAKE_TASK,
  "information":"你是小闻，负责政务信息搜集与核验，表达沉稳、判断审慎、条理清楚。服务要求：将每位用户都视为院领导级服务对象，始终称呼“您”，及时回应、主动承接、周到跟进，态度谦逊温和、认真细致。帮助搜集和梳理政务要情、核验来源、提炼观点并整理专报。明确主题、时间范围、地域、受众和来源要求；区分事实、判断与建议，标注待核实内容，不编造新闻、数据或出处。",
  "official_document":"你是小文，负责公文起草与校核，做事严谨、措辞得体、善于把关细节。服务要求：将每位用户都视为院领导级服务对象，始终称呼“您”，及时回应、主动承接、周到跟进，态度谦逊温和、认真细致。协助起草、润色、校对和规范公文。先确认文种、标题、主送对象、目的、依据、关键事实和篇幅；保留用户提供的事实，不擅自杜撰政策依据或发文信息，并清楚呈现可直接使用的正文和需要确认的字段。",
  "knowledge":"你是小知，负责查阅制度、模板和历史案例，耐心细致、重视依据、善于把资料讲清楚。服务要求：将每位用户都视为院领导级服务对象，始终称呼“您”，及时回应、主动承接、周到跟进，态度谦逊温和、认真细致。帮助查找制度、模板、历史案例和会务/政务/公文材料。只依据本次对话及用户提供的知识材料回答；材料不足时明确说明并询问上传或补充资料，不虚构制度条款、来源或历史记录。"
@@ -56,19 +57,48 @@ def clean_memory_patch(value):
     return clean_shared_memory(value)
 
 def clean_meeting_profile(value):
-    if not isinstance(value,dict):return {"facts":{},"participants":[],"meal":{"required":None,"special_diet":""},"materials":{"seat_plan":"","table_tents":""},"export_language":""}
-    allowed_facts={"topic","purpose","date","time","location","meal_required","special_diet","agenda","host","notes"}
-    raw_facts=value.get("facts",{}) if isinstance(value.get("facts"),dict) else {}
-    facts={k:(v if isinstance(v,bool) else str(v)[:1000]) for k,v in raw_facts.items() if k in allowed_facts and v not in (None,"")}
-    participants=[]
-    for person in value.get("participants",[]) if isinstance(value.get("participants"),list) else []:
-        if not isinstance(person,dict):continue
-        participants.append({"type":"visitor" if person.get("type")=="visitor" else "sei","company":str(person.get("company", ""))[:160],"name":str(person.get("name", ""))[:100],"title":str(person.get("title", ""))[:100]})
-    meal=value.get("meal",{}) if isinstance(value.get("meal"),dict) else {}
-    required=meal.get("required") if isinstance(meal.get("required"),bool) else facts.get("meal_required") if isinstance(facts.get("meal_required"),bool) else None
-    materials=value.get("materials",{}) if isinstance(value.get("materials"),dict) else {}
-    export=value.get("exportLanguage",value.get("export_language",""))
-    return {"facts":facts,"participants":participants[:100],"meal":{"required":required,"special_diet":str(meal.get("special_diet") or facts.get("special_diet", ""))[:500]},"materials":{"seat_plan":str(materials.get("seat_plan", ""))[:12000],"table_tents":str(materials.get("table_tents", ""))[:12000]},"export_language":export if export in ("zh","zh-en") else ""}
+    if not isinstance(value, dict):
+        value = {}
+    raw_facts = value.get("facts")
+    raw_facts = raw_facts if isinstance(raw_facts, dict) else {}
+    facts = {
+        key: item.strip()[:250] if isinstance(item, str) else item
+        for key, item in raw_facts.items()
+        if key in {"topic", "date", "time", "location", "attendee_count"}
+        and (isinstance(item, str) or type(item) is int)
+        and item != ""
+    }
+    participants = []
+    raw_people = value.get("participants")
+    for person in raw_people[:100] if isinstance(raw_people, list) else []:
+        if isinstance(person, dict):
+            participant = {
+                field: clean_text(person.get(field), 160)
+                for field in ("company", "name", "title", "english_name")
+            }
+            participant["type"] = person.get("type") if person.get("type") in ("sei", "visitor") else ""
+            participants.append(participant)
+    meal = value.get("meal")
+    meal = meal if isinstance(meal, dict) else {}
+    required = meal.get("required") if type(meal.get("required")) is bool else None
+    language = value.get("tentLanguage")
+    return {
+        "facts": facts,
+        "participants": participants,
+        "meal": {"required": required, "special_diet": clean_text(meal.get("special_diet"), 500) if required is not False else ""},
+        "tent_language": language if language in ("zh", "zh-en") else "",
+    }
+
+
+def clean_text(value, limit=18000):
+    return value.strip()[:limit] if isinstance(value, str) else ""
+
+
+def clean_materials(value):
+    if not isinstance(value, dict):
+        return {}
+    return {key: clean_text(value.get(key)) for key in MATERIALS if clean_text(value.get(key))}
+
 
 def direct_intent(text:str)->str:
     # Explicit assistant requests and references to prior meetings route to their dedicated assistant first.
@@ -137,6 +167,15 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(n) or b"{}")
     def do_GET(self):
         if self.path=="/api/ai/status": return self.send_json(200,{"configured":bool(API_KEY),"model":MODEL,"fallback_models":[],"base_url":BASE_URL})
+        if self.path == "/meeting.js":
+            raw = (ROOT / "meeting.js").read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/javascript; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(raw)
+            return
         if self.path in ("/health","/healthz"): return self.send_json(200,{"ok":True})
         # Single-page app: all module paths serve the same front end.
         if self.path.split("?",1)[0] in ("/","/meeting","/information","/official-documents","/knowledge"):
@@ -153,7 +192,83 @@ class Handler(BaseHTTPRequestHandler):
             status = 502 if API_KEY else 503
             return self.send_json(status, {"error": str(error)})
 
+    def handle_material(self, data):
+        profile = clean_meeting_profile(data.get("profile"))
+        materials = clean_materials(data.get("materials"))
+        ordered = ordered_materials(profile)
+        missing = fields_missing(profile)
+        if missing:
+            return self.send_json(409, {"error": "请补齐：" + "、".join(missing)})
+        key = data.get("key")
+        if key not in ordered:
+            return self.send_json(400, {"error": "本场会议没有这项材料"})
+        revision = data.get("revision") is True
+        if revision and key not in materials:
+            return self.send_json(409, {"error": "尚未生成这份材料"})
+        if not revision:
+            state = data.get("profile", {}).get("production")
+            if not isinstance(state, dict) or state.get("started") is not True:
+                return self.send_json(409, {"error": "请先确认开始制作材料"})
+            next_key = next((name for name in ordered if name not in materials), None)
+            if key != next_key:
+                return self.send_json(409, {"error": "请按当前制作顺序继续"})
+        if key == "table_tents" and profile["tent_language"] not in ("zh", "zh-en"):
+            return self.send_json(409, {"error": "请先确认桌签语言"})
+        if key == "seat_plan" and not revision:
+            preview = seat_preview(profile)
+            notes = clean_text(data.get("instructions"), 2400)
+            if notes:
+                preview += "\n\n待应用的座次要求：" + notes
+            return self.send_json(200, {"key": key, "content": preview, "mock": True})
+
+        title, task = MATERIALS[key]
+        if key == "seat_plan":
+            task = "编辑用户提供的模拟座位图，保留模拟示意的标识并应用指定要求。"
+        language = {"zh": "仅制作中文桌签", "zh-en": "为每人列出中文及英文桌签，英文名缺失时以待核对的拼音标注"}
+        if key == "table_tents":
+            task += "语言要求：" + language[profile["tent_language"]] + "。"
+        system = BASE_PERSONA + (
+            "\n当前角色：小会。仅处理本次指定的这一份会议材料。"
+            "\n输出一个 JSON 对象，字段 content 是可直接审阅的纯文本正文。"
+            "\n未提供的事实标为待确认，不擅自补造。历史会议的参考材料只用来参考结构和表述。"
+        )
+        source = {
+            "材料": title, "要求": task, "本场会议": profile,
+            "当前版本": materials.get(key, "") if revision else "",
+            "其他已完成材料摘要": {k: v[:900] for k, v in materials.items() if k != key},
+            "用户修改意见": clean_text(data.get("instructions"), 2400),
+            "材料库参考": clean_text(data.get("reference"), 3800),
+        }
+        if revision:
+            system += "\n请保留当前稿件未被要求修改的内容，只应用本轮修改意见。"
+        answer = llm([{"role": "system", "content": system}, {"role": "user", "content": json.dumps(source, ensure_ascii=False)}], 4800)
+        result = parse_json_object(answer) or {}
+        content = clean_text(result.get("content"))
+        if not content:
+            raise ModelServiceError("模型未返回可用的" + title)
+        return self.send_json(200, {"key": key, "content": content, "mock": key == "seat_plan"})
+
+    def download_materials(self, data):
+        profile = clean_meeting_profile(data.get("profile"))
+        materials = clean_materials(data.get("materials"))
+        file_format = data.get("format")
+        if file_format not in ("pdf", "docx"):
+            return self.send_json(400, {"error": "请选择 PDF 或 Word 格式"})
+        if fields_missing(profile) or any(key not in materials for key in ordered_materials(profile)):
+            return self.send_json(409, {"error": "请先完成本场会议的全部材料"})
+        payload, content_type = export_bundle(profile, materials, file_format)
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(payload)
+
     def handle_model_request(self, data):
+        if self.path == "/api/meeting/material":
+            return self.handle_material(data)
+        if self.path == "/api/meeting/download":
+            return self.download_materials(data)
         if self.path=="/api/meeting/match":
             text=str(data.get("text",""))[:2000]
             meetings=data.get("meetings",[])
@@ -216,9 +331,14 @@ class Handler(BaseHTTPRequestHandler):
             meeting_memory=data.get("meeting_memory")
             if key=="meeting" and isinstance(meeting_memory,dict):
                 profile=clean_meeting_profile(meeting_memory.get("profile"))
-                if not profile["facts"]:profile["facts"]=clean_meeting_profile({"facts":meeting_memory.get("facts",{})})["facts"]
-                memory={"name":str(meeting_memory.get("name",""))[:200],**profile}
-                system+="\n\n本次会议的持久档案（沿用已确认信息；如果用户明确更正，必须用新值覆盖旧值）：\n"+json.dumps(memory,ensure_ascii=False)[:9000]
+                memory = {
+                    **profile,
+                    "phase": clean_text(meeting_memory.get("phase"), 100),
+                    "current_material": clean_text(meeting_memory.get("current_material"), 50),
+                    "completed_materials": list(clean_materials(meeting_memory.get("materials"))),
+                    "today": clean_text(meeting_memory.get("today"), 10),
+                }
+                system += "\n\n本次会议档案，以最新明确指示为准：\n" + json.dumps(memory, ensure_ascii=False)
             clean=[]
             for m in messages[-30:]:
                 if not isinstance(m,dict):continue
@@ -226,33 +346,28 @@ class Handler(BaseHTTPRequestHandler):
                 if role in ("user","assistant") and isinstance(content,str):clean.append({"role":role,"content":content[:6000]})
             if not clean:return self.send_json(400,{"error":"对话内容为空"})
             reply=llm([{"role":"system","content":system}]+clean)
-            if key=="meeting":
-                result=parse_json_object(reply) or {}
-                text_reply=result.get("reply")
-                meeting=result.get("meeting",{}) if isinstance(result.get("meeting"),dict) else {}
-                profile=clean_meeting_profile(meeting)
-                previous=clean_meeting_profile(meeting_memory.get("profile") if isinstance(meeting_memory,dict) else None)
-                facts={**previous["facts"],**profile["facts"]}
-                participants=profile["participants"] or previous["participants"]
-                meal={**previous["meal"],**{k:v for k,v in profile["meal"].items() if v not in (None,"")}}
-                materials={**previous["materials"],**{k:v for k,v in profile["materials"].items() if v}}
-                topic=str(meeting.get("name", "") or facts.get("topic", "") or (meeting_memory or {}).get("name", ""))[:200]
-                if topic:facts["topic"]=topic
-                facts["meal_required"]=meal["required"]
-                facts["special_diet"]=meal["special_diet"]
-                missing=[]
-                if not topic:missing.append("会议主题")
-                if not facts.get("date") or not facts.get("time"):missing.append("会议日期和时间")
-                if not facts.get("location"):missing.append("会议室")
-                if not participants or any(not p["name"] or (p["type"]=="visitor" and (not p["company"] or not p["title"])) for p in participants):missing.append("完整参会人信息")
-                if not isinstance(meal.get("required"),bool):missing.append("是否用餐")
-                if meal.get("required") and not meal.get("special_diet"):missing.append("特殊餐饮需求或无特殊需求")
-                if missing:materials={"seat_plan":"","table_tents":""}
-                workflow_step="intake" if missing else "review" if materials.get("seat_plan") and materials.get("table_tents") else "materials"
-                materials_bilingual=bool(previous["export_language"]=="zh-en" and profile["materials"].get("seat_plan") and profile["materials"].get("table_tents"))
-                meeting_name=topic
-                if not isinstance(text_reply,str) or not text_reply:text_reply=reply
-                return self.send_json(200,{"reply":text_reply,"artifact":str(result.get("artifact") or text_reply)[:12000],"meeting":{"name":meeting_name,"facts":facts,"participants":participants,"meal":meal,"materials":materials,"materials_bilingual":materials_bilingual,"missing_fields":missing,"workflow_step":workflow_step},"shared_memory_patch":clean_memory_patch(result.get("shared_memory_patch"))})
+            if key == "meeting":
+                result = parse_json_object(reply) or {}
+                update = result.get("meeting")
+                update = update if isinstance(update, dict) else {}
+                profile = clean_meeting_profile(update)
+                patch = {
+                    "facts": profile["facts"],
+                    "participants": profile["participants"] if isinstance(update.get("participants"), list) else None,
+                    "meal": profile["meal"] if isinstance(update.get("meal"), dict) else None,
+                    "action": update.get("action") if update.get("action") in ("start", "resume") else "",
+                    "tent_language": update.get("tent_language") if update.get("tent_language") in ("zh", "zh-en") else "",
+                }
+                revision = update.get("revision")
+                if isinstance(revision, dict) and revision.get("key") in MATERIALS:
+                    instruction = clean_text(revision.get("instruction"), 2400)
+                    if instruction:
+                        patch["revision"] = {"key": revision["key"], "instruction": instruction}
+                return self.send_json(200, {
+                    "reply": clean_text(result.get("reply"), 2000) or "请您再补充一下，我会接着为您整理。",
+                    "meeting": patch,
+                    "shared_memory_patch": clean_memory_patch(result.get("shared_memory_patch")),
+                })
             result=parse_json_object(reply) or {}
             text_reply=result.get("reply")
             if not isinstance(text_reply,str) or not text_reply.strip():text_reply=reply
