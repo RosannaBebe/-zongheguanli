@@ -51,7 +51,7 @@ body{min-height:100vh;background:radial-gradient(ellipse at 84% 12%,#b9e0f1 0,tr
 .meeting-download {align-items:end}
 </style>
 <style>
-.home-dialog{width:min(100%,820px);max-height:260px;overflow:auto;display:flex;flex-direction:column;gap:10px;margin:16px auto 0;padding:4px 2px;scrollbar-color:#9eb8d5 transparent}.home-dialog .message{max-width:min(82%,720px);font-size:14px;padding:12px 16px;border-radius:17px}.home-dialog .message.assistant{align-self:flex-start;background:#fff;border-color:#d4e0ed;box-shadow:0 4px 14px #24466d0b}.home-dialog .message.user{align-self:flex-end;background:#e2edfb;border-color:#c3d5ec;border-bottom-right-radius:5px}.home-dialog .message.pending{align-self:flex-start;color:#526981}.drawer-foot{display:flex;gap:8px;flex-wrap:wrap}
+.home-dialog{width:min(100%,820px);max-height:260px;overflow:auto;display:flex;flex-direction:column;gap:10px;margin:16px auto 0;padding:4px 2px;scrollbar-color:#9eb8d5 transparent}.home-dialog .message{max-width:min(82%,720px);font-size:14px;padding:12px 16px;border-radius:17px}.home-dialog .message.assistant{align-self:flex-start;background:#fff;border-color:#d4e0ed;box-shadow:0 4px 14px #24466d0b}.home-dialog .message.user{align-self:flex-end;background:#e2edfb;border-color:#c3d5ec;border-bottom-right-radius:5px}.home-model-error{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:3px 4px;color:#8b3d28;font-size:12px}.home-dialog .message.pending{align-self:flex-start;color:#526981}.drawer-foot{display:flex;gap:8px;flex-wrap:wrap}
 </style>
 </head>
 <body>
@@ -86,7 +86,7 @@ if(restore){for(const m of restore.messages||[])makeMessage(m.text,m.role,false)
 else if(!options.silent){makeMessage(cfg.welcome,'assistant',false)}
 const firstRequest=initial||(restore?.messages||[]).find(m=>m.role==='user')?.text||'';$('resultRequest').hidden=!firstRequest;$('resultRequestText').textContent=firstRequest;if(location.hash!=='#workbench/'+intent)history.pushState({workbench:intent},'', '#workbench/'+intent);if(intent==='meeting')renderMeetingWorkflow();setTimeout(()=>$('chatInput').focus(),50)}
 function simpleIntent(text){if(/会务助手|政务信息助手|公文助手|综合知识库/u.test(text)){if(/政务信息助手/u.test(text))return'information';if(/公文助手/u.test(text))return'official_document';if(/综合知识库/u.test(text))return'knowledge';return'meeting'}if(/(之前|上次|刚才|原来|那场|这场|继续|接着|讨论过|已经聊过).{0,12}(会议|会务|参会|人数|材料)|(会议|会务).{0,10}(改成|调整|更新|继续|接着|之前|上次)/u.test(text))return'meeting';if(/(查询|查找|查阅|搜一下|历史|以前|制度|模板|案例)/u.test(text)&&/(会议制度|会务制度|会议模板|会议案例|公文|信息|资料|要情|制度|模板|案例)/u.test(text))return'knowledge';if(/知识库/u.test(text))return'knowledge';if(/办会|办个会|开会|会议|会务|参会|会议室|会场/u.test(text))return'meeting';if(/要情|专报|新闻|信息稿|搜集.{0,4}信息/u.test(text))return'information';if(/公文|通知|请示|起草|润色|校对/u.test(text))return'official_document';return''}
-async function classify(text){return await request('/api/ai/workbench-intent',{text,messages:homeConversation?.messages||[],shared_memory:readSharedMemory()})}
+async function classify(text, conversation){return await request('/api/ai/workbench-intent',{text,messages:conversation.messages,shared_memory:readSharedMemory()})}
 async function request(url,data,options={}){if(location.protocol==='file:')throw new Error('本地 HTML 可查看界面，请通过网站或本地服务使用模型。');const res=await fetch(url,{method:data?'POST':'GET',headers:data?{'Content-Type':'application/json'}:{},body:data?JSON.stringify(data):undefined,signal:options.signal});const body=await res.json().catch(()=>({}));if(!res.ok)throw new Error(body.error||'请求失败');return body}
 async function findPreviousMeeting(text){const items=readHistory().filter(x=>x.assistant==='meeting');if(!items.length)return null;const meetings=items.slice(0,40).map(x=>({id:x.id,name:x.meetingName||'',title:x.title||'',facts:x.meetingFacts||{},messages:(x.messages||[]).filter(m=>m.role==='user').slice(-8).map(m=>m.text.slice(0,300))}));let clarify=false;try{const result=await request('/api/meeting/match',{text,meetings});if(result.match_id){const found=items.find(x=>x.id===result.match_id);if(found)return{conversation:found}}clarify=!!result.clarify}catch(_){}const normalized=text.replace(/[\s，。！？、：:；;“”"'（）()]/g,'').toLowerCase();const exact=items.find(x=>{const name=(x.meetingName||'').replace(/[\s，。！？、：:；;“”"'（）()]/g,'').toLowerCase();return name.length>1&&normalized.includes(name)});if(exact)return{conversation:exact};return clarify?{clarify:true}:null}
 async function sendToAgent(text, options = {}) {
@@ -136,19 +136,66 @@ homeInput.addEventListener('keydown', event => {
   if (!event.repeat && !busy && homeInput.value.trim()) homeForm.requestSubmit();
 });
 
-homeForm.addEventListener('submit', async event => {
-  event.preventDefault();
-  const text = homeInput.value.trim();
-  if(!text||busy)return;if(!homeConversation)homeConversation={id:(crypto.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2)),assistant:'home',title:'首页综合助手对话',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),messages:[]};
+function clearHomeModelError() {
+  $('homeDialog').querySelector('.home-model-error')?.remove();
+}
+
+function showHomeModelError(error, text, conversation) {
+  clearHomeModelError();
+  const status = document.createElement('div');
+  status.className = 'home-model-error';
+  status.setAttribute('role', 'status');
+  const message = document.createElement('span');
+  message.textContent = error instanceof TypeError
+    ? '暂时无法连接本地服务。'
+    : error.message || '本次请求未完成。';
+  const retry = document.createElement('button');
+  retry.type = 'button';
+  retry.className = 'button';
+  retry.textContent = '重试';
+  retry.addEventListener('click', () => {
+    if (!busy && conversation === homeConversation) sendHomeMessage(text, conversation);
+  });
+  status.append(message, retry);
+  const log = $('homeDialog');
+  log.append(status);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function sendHomeMessage(text, conversation) {
   busy = true;
+  clearHomeModelError();
   $('homeThinking').hidden = false;
-  makeHomeMessage(text, 'user');
-  homeInput.value = '';
-  try{const result=await classify(text);if(result.shared_memory_patch)mergeSharedMemory(result.shared_memory_patch);if(!assistants[result.intent]){makeHomeMessage(result.reply||'没关系，您不用先想好要找哪位助手。方便告诉我，您眼下最想解决的一件事是什么？我会陪您一起梳理。','assistant');homeConversation.handoffSummary='';persistHomeConversation();return}homeConversation.handoffSummary=result.handoff_summary||homeConversation.messages.filter(m=>m.role==='user').map(m=>m.text).join('；').slice(-1800);makeHomeMessage(result.reply||'好的，我已经了解您的需求，接下来由专属助手为您接着办理。','assistant');persistHomeConversation();const handoff=homeConversation.handoffSummary;await new Promise(resolve=>setTimeout(resolve,500));if(result.intent==='meeting'){const previous=await findPreviousMeeting(text);if(previous?.conversation){busy=false;startSession('meeting','',previous.conversation,{homeHandoff:handoff});await sendToAgent(text,{skipMatch:true});return}if(previous?.clarify){pendingMeetingRequest=text;pendingHomeHandoff=handoff;busy=false;startSession('meeting','',null,{silent:true,homeHandoff:handoff});makeMessage('为避免重复建立会议记录，我查到几条可能相关的会议。请您从左侧列表选择要继续办理的会议；如为新会议，请点击“＋ 新建会议”，我会沿用您刚才提供的需求。','assistant',false);$('resultRequest').hidden=false;$('resultRequestText').textContent=text;return}}busy=false;$('homeDialog').hidden=true;startSession(result.intent,'',null,{silent:result.intent!=='meeting',homeHandoff:handoff});await sendToAgent(text,{skipMatch:true})}catch(err){makeHomeMessage(location.protocol==='file:'?err.message:'暂未连接到模型服务，请稍后再试。','assistant');$('modelStatus').textContent='模型服务暂不可用'}finally {
+  try {
+    const result = await classify(text, conversation);
+    if (homeConversation !== conversation || $('homeView').hidden) return;
+    clearHomeModelError();
+    if(result.shared_memory_patch)mergeSharedMemory(result.shared_memory_patch);if(!assistants[result.intent]){makeHomeMessage(result.reply||'没关系，您不用先想好要找哪位助手。方便告诉我，您眼下最想解决的一件事是什么？我会陪您一起梳理。','assistant');homeConversation.handoffSummary='';persistHomeConversation();return}homeConversation.handoffSummary=result.handoff_summary||homeConversation.messages.filter(m=>m.role==='user').map(m=>m.text).join('；').slice(-1800);makeHomeMessage(result.reply||'好的，我已经了解您的需求，接下来由专属助手为您接着办理。','assistant');persistHomeConversation();const handoff=homeConversation.handoffSummary;await new Promise(resolve=>setTimeout(resolve,500));if(homeConversation!==conversation||$('homeView').hidden)return;if(result.intent==='meeting'){const previous=await findPreviousMeeting(text);if(homeConversation!==conversation||$('homeView').hidden)return;if(previous?.conversation){busy=false;startSession('meeting','',previous.conversation,{homeHandoff:handoff});await sendToAgent(text,{skipMatch:true});return}if(previous?.clarify){pendingMeetingRequest=text;pendingHomeHandoff=handoff;busy=false;startSession('meeting','',null,{silent:true,homeHandoff:handoff});makeMessage('为避免重复建立会议记录，我查到几条可能相关的会议。请您从左侧列表选择要继续办理的会议；如为新会议，请点击“＋ 新建会议”，我会沿用您刚才提供的需求。','assistant',false);$('resultRequest').hidden=false;$('resultRequestText').textContent=text;return}}busy=false;$('homeDialog').hidden=true;startSession(result.intent,'',null,{silent:result.intent!=='meeting',homeHandoff:handoff});await sendToAgent(text,{skipMatch:true})
+  } catch (error) {
+    if (homeConversation === conversation && !$('homeView').hidden) showHomeModelError(error, text, conversation);
+  } finally {
     busy = false;
     $('homeThinking').hidden = true;
   }
+}
+
+homeForm.addEventListener('submit', event => {
+  event.preventDefault();
+  const text = homeInput.value.trim();
+  if (!text || busy) return;
+  if (!homeConversation) {
+    const now = new Date().toISOString();
+    homeConversation = {
+      id: crypto.randomUUID?.() || Date.now() + '-' + Math.random().toString(36).slice(2),
+      assistant: 'home', title: '首页综合助手对话', createdAt: now, updatedAt: now, messages: [],
+    };
+  }
+  clearHomeModelError();
+  makeHomeMessage(text, 'user');
+  homeInput.value = '';
+  sendHomeMessage(text, homeConversation);
 });
+
 for(const button of document.querySelectorAll('[data-assistant]'))button.addEventListener('click',()=>startSession(button.dataset.assistant));
 $('newConversation').addEventListener('click',()=>{const pending=pendingMeetingRequest,handoff=pendingHomeHandoff;pendingMeetingRequest='';pendingHomeHandoff='';startSession(active?.assistant||'meeting','',null,{silent:!!pending,homeHandoff:handoff});if(pending)sendToAgent(pending,{skipMatch:true})});
 $('backHome').addEventListener('click',()=>{resetMeetingSessions();saveHistory();active=null;homeConversation=null;$('messages').replaceChildren();$('homeDialog').replaceChildren();$('homeDialog').hidden=true;$('workspaceView').hidden=true;$('homeView').hidden=false;$('topbar').hidden=false;history.pushState({},'',location.href.split('#')[0])});
