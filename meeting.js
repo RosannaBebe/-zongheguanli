@@ -102,8 +102,19 @@ function archiveMeetingMaterial(r, key, content) {
 function meetingIntake(r) {
   const f = r.facts;
   const info = [['日期', f.date], ['时间', f.time], ['会议室', f.location], ['主题', f.topic]];
-  const peopleMissing = r.participants.some(p => !p.name || !['sei', 'visitor'].includes(p.type)
-    || (p.type === 'visitor' && (!p.company || !p.title)));
+  const peopleMissing = [];
+  if (!r.participants.some(p => p.type === 'sei')) peopleMissing.push('SEI 参会人姓名');
+  if (f.no_external_attendees !== true && !r.participants.some(p => p.type === 'visitor')) {
+    peopleMissing.push('外方参会人的公司、姓名和职务（如无外方，请告知）');
+  }
+  for (const person of r.participants) {
+    const missing = [];
+    if (!['sei', 'visitor'].includes(person.type)) missing.push('参会方');
+    if (!person.name?.trim()) missing.push('姓名');
+    if (person.type === 'visitor' && !person.company?.trim()) missing.push('公司');
+    if (!person.title?.trim()) missing.push('职务');
+    if (missing.length) peopleMissing.push(`${person.name || '未署名参会人'}：${missing.join('、')}`);
+  }
   const count = String(f.attendee_count ?? '').trim();
   const countMismatch = /^\d+$/.test(count) && Number(count) !== r.participants.length;
   return [
@@ -112,9 +123,9 @@ function meetingIntake(r) {
       missing: info.filter(([, value]) => !value).map(([label]) => label),
     },
     {
-      title: '参会人信息', requirement: '主办方（SEI）记录姓名，外部参会方记录公司、姓名和职务。',
+      title: '参会人信息', requirement: 'SEI 按姓名查询职务，外方由您提供公司、姓名和职务。',
       missing: [
-        ...(!r.participants.length || peopleMissing ? ['完整参会名单'] : []),
+        ...peopleMissing,
         ...(countMismatch ? [`已登记 ${r.participants.length} 人，需与 ${count} 人的总数核对`] : []),
       ],
     },
@@ -225,6 +236,7 @@ async function runMeetingProduction() {
 
 async function recoverSavedMeetingBasics(session) {
   const record = getMeetingRecord();
+  if (record) recoverSeiTitles(session, record);
   if (!record || record.basicsRecovered || !meetingIntake(record)[0].missing.length) return;
   const messages = session.messages.filter(message => message.role === 'user');
   if (!messages.length) return;
@@ -245,6 +257,33 @@ async function recoverSavedMeetingBasics(session) {
   }
 }
 
+async function recoverSeiTitles(session, record) {
+  const people = record.participants.filter(person =>
+    person.type === 'sei' && person.name && (!person.title || ['mock', 'directory'].includes(person.title_source))
+  );
+  if (!people.length) return;
+  try {
+    const {participants} = await request('/api/meeting/resolve-sei-titles', {names: people.map(person => person.name)});
+    if (active !== session) return;
+    const before = JSON.stringify([record.facts, record.participants, record.meal]);
+    for (const person of people) {
+      if (!record.participants.includes(person)) continue;
+      const match = participants.find(item => item.name === person.name);
+      if (!match) continue;
+      person.title = match.title;
+      if (match.title_source) person.title_source = match.title_source;
+      else delete person.title_source;
+    }
+    if (changedMeetingFacts(record, before)) {
+      pauseMeetingRun();
+      persistMeetingRecord(record);
+      if (!busy && editingIntakeStep === null) renderMeetingWorkflow();
+    }
+  } catch (_) {
+    // Any unmatched titles remain visible in the intake checklist.
+  }
+}
+
 function applyMeetingPatch(r, patch) {
   if (!patch) return false;
   let changed = false;
@@ -256,9 +295,13 @@ function applyMeetingPatch(r, patch) {
     }
   }
   if (Array.isArray(patch.participants) && JSON.stringify(r.participants) !== JSON.stringify(patch.participants)) {
-    const identity = person => [person.type, person.company || '', person.name, person.title || '', person.english_name || ''];
+    const identity = person => [person.type, person.company || '', person.name, person.title || '', person.english_name || '', person.title_source || ''];
     if (JSON.stringify(r.participants.map(identity)) !== JSON.stringify(patch.participants.map(identity))) changed = true;
     r.participants = patch.participants;
+    if (r.participants.some(person => person.type === 'visitor') && r.facts.no_external_attendees === true) {
+      r.facts.no_external_attendees = false;
+      changed = true;
+    }
   }
   if (patch.meal) {
     const meal = {...r.meal};
@@ -345,6 +388,7 @@ async function sendMeetingMessage(text, options = {}) {
     if (active !== session) return;
     mergeSharedMemory(out.shared_memory_patch);
     const before = JSON.stringify([r.facts, r.participants, r.meal]);
+    const previousIntake = meetingIntake(r);
     const hadMaterials = Object.keys(r.materials).length > 0;
     const changed = applyMeetingPatch(r, out.meeting);
     const revision = out.meeting?.revision;
@@ -352,7 +396,18 @@ async function sendMeetingMessage(text, options = {}) {
       changedMeetingFacts(r, before);
       persistMeetingRecord(r);
     }
-    makeMessage(out.reply, 'assistant');
+    const intake = meetingIntake(r);
+    const currentStep = intake.findIndex(step => step.missing.length);
+    let reply = out.reply;
+    if (!revision && currentStep === 1) {
+      reply = '为便于核对名单，请您补充以下信息：\n' + intake[1].missing.map(item => '· ' + item).join('\n');
+    } else if (!revision && previousIntake[1].missing.length && !intake[1].missing.length) {
+      reply = '双方参会名单及职务已核齐，您可以在右侧查看。';
+      if (r.participants.some(person => person.title_source === 'mock')) {
+        reply += ' SEI 名单中的模拟职务已单独标明。';
+      }
+    }
+    makeMessage(reply, 'assistant');
     if (revision) await reviseMeetingMaterial(r, revision);
     if (active !== session) return;
 
@@ -385,32 +440,43 @@ async function sendMeetingMessage(text, options = {}) {
   if (resume && active === session) runMeetingProduction();
 }
 
-function renderMeetingAttendees(r) {
+function renderAttendeeList(r, editable = false) {
   const people = r.participants.map((person, index) => {
-    const role = {visitor: '访客', sei: 'SEI'}[person.type] || '待确认身份';
-    const name = [role, person.company, person.name, person.title].filter(Boolean).map(meetingEscape).join(' · ');
-    return `<div class="attendee-item"><span>${name}</span><button type="button" class="workflow-btn" data-remove-attendee="${index}">移除</button></div>`;
+    const role = {visitor: '外方', sei: 'SEI'}[person.type] || '待确认参会方';
+    const title = person.title ? person.title + (person.title_source === 'mock' ? '（模拟）' : '') : '职务待补充';
+    const info = [role, person.company, person.name || '姓名待补充', title].filter(Boolean).map(meetingEscape).join(' · ');
+    return `<div class="attendee-item"><span>${info}</span>${editable ? `
+      <button type="button" class="workflow-btn" data-edit-attendee="${index}">编辑</button>
+      <button type="button" class="workflow-btn" data-remove-attendee="${index}">移除</button>` : ''}</div>`;
   }).join('');
+  return `<div class="attendee-list">${people || '<span class="workflow-hint">尚未添加参会人。</span>'}</div>`;
+}
+
+function renderMeetingAttendees(r) {
   const visitors = meetingArray(VISITOR_KEY);
   return `<div class="attendee-row">
     <label class="workflow-field">身份<select id="attendeeType"><option value="sei">主办方（SEI）</option><option value="visitor">外部参会方</option></select></label>
     <label class="workflow-field" id="companyField" hidden>公司<input id="attendeeCompany" maxlength="160"></label>
     <label class="workflow-field">姓名<input id="attendeeName" maxlength="160"></label>
     <label class="workflow-field" id="titleField" hidden>职务<input id="attendeeTitle" maxlength="160"></label>
-    <button type="button" class="workflow-btn" data-meeting-action="add-attendee">添加</button>
+    <button type="button" class="workflow-btn" id="saveMeetingAttendee" data-meeting-action="add-attendee">添加</button>
+    <button type="button" class="workflow-btn" id="cancelMeetingAttendee" data-meeting-action="cancel-attendee" hidden>取消</button>
   </div>
-  <div class="attendee-list">${people || '<span class="workflow-hint">尚未添加参会人。</span>'}</div>
+  ${renderAttendeeList(r, true)}
+  ${r.participants.some(person => person.type === 'visitor') ? '' : `
+    <label class="workflow-hint"><input type="checkbox" id="noExternalAttendees" ${r.facts.no_external_attendees ? 'checked' : ''}> 本场无外方参会人</label>`}
   <details class="visitor-directory">
     <summary>查询访客人员库 · ${visitors.length} 人</summary>
-    <label class="workflow-field">公司、姓名或职务<input id="visitorLookup" autocomplete="off"></label>
+    <label class="workflow-field">公司或姓名<input id="visitorLookup" autocomplete="off"></label>
+    <p class="workflow-hint">选中后带入公司和姓名，请补充本次参会职务。</p>
     <div class="visitor-matches" id="visitorMatches">${visitorMatches('')}</div>
   </details>`;
 }
 
 function visitorMatches(query) {
   const results = meetingArray(VISITOR_KEY).filter(v =>
-    [v.company, v.name, v.title].join(' ').toLowerCase().includes(query.trim().toLowerCase())).slice(0, 20);
-  return results.map(v => `<button class="visitor-match" data-use-visitor="${meetingEscape(v.key)}" type="button">${meetingEscape(v.company)} · ${meetingEscape(v.name)} · ${meetingEscape(v.title)}</button>`).join('')
+    [v.company, v.name].join(' ').toLowerCase().includes(query.trim().toLowerCase())).slice(0, 20);
+  return results.map(v => `<button class="visitor-match" data-use-visitor="${meetingEscape(v.key)}" type="button">${meetingEscape(v.company)} · ${meetingEscape(v.name)}</button>`).join('')
     || '<span class="workflow-hint">暂无匹配访客。</span>';
 }
 
@@ -477,21 +543,25 @@ function renderMeetingIntake(r, steps, startAction, productionVisible) {
   const previousForm = $('meetingIntakeFields');
   const keepOpen = previousForm?.dataset.step === String(stepIndex) && previousForm.open;
   const f = r.facts;
+  const seiCount = r.participants.filter(person => person.type === 'sei').length;
+  const visitorCount = r.participants.filter(person => person.type === 'visitor').length;
   const summaries = [
     [f.topic, f.date, f.time, f.location].filter(Boolean).join(' · '),
-    r.participants.map(person => person.name).filter(Boolean).slice(0, 3).join('、') + ' · ' + r.participants.length + ' 人',
+    `SEI ${seiCount} 人 · 外方 ${visitorCount} 人 · 姓名与职务齐全`,
     r.meal.required ? ('用餐 · ' + (r.meal.special_diet === '无' ? '无特殊要求' : r.meal.special_diet)) : '不用餐',
   ];
   const prompts = [
     '您可以把会议主题、时间和地点直接告诉赛博小潘。',
-    '您可以直接贴名单，或从访客库选取曾来访的人员。',
+    '请提供 SEI 参会人姓名，我会按姓名查询职务。外方请提供公司、姓名和职务。',
     '请告诉我是否安排用餐。有特殊要求的话，也可以一起说明。',
   ];
   const confirmed = steps.map((item, index) => {
-    if (item.missing.length || (isEditing && index === stepIndex)) return '';
+    if (item.missing.length || (isEditing && index === stepIndex) || (index === 2 && steps[1].missing.length)) return '';
     return `<li class="intake-confirmed">
       <span class="meeting-step-number intake-check" aria-label="已确认">✓</span>
-      <div><strong>${index + 1} · ${item.title}</strong><p>${meetingEscape(summaries[index])}</p></div>
+      <div><strong>${index + 1} · ${item.title}</strong><p>${meetingEscape(summaries[index])}</p>
+        ${index === 1 ? `<details class="attendee-review"><summary>查看参会名单</summary>${renderAttendeeList(r)}</details>` : ''}
+      </div>
       <div class="intake-confirmed-actions">
         ${index === 0 && f.location ? `<button type="button" class="workflow-btn room-preview-button" data-room-preview="true" aria-label="查看${meetingEscape(f.location)}会议室俯视示意图">查看会议室</button>` : ''}
         <button type="button" class="workflow-btn intake-edit" data-intake-step="${index}" aria-label="修改${item.title}">修改</button>
@@ -507,7 +577,9 @@ function renderMeetingIntake(r, steps, startAction, productionVisible) {
       <div class="intake-current-heading"><span class="meeting-step-number">${stepIndex + 1}</span>
         <strong>${step.title}</strong></div>
       ${!isEditing ? `<p>${prompts[stepIndex]}</p>
-        ${stepIndex === 0 && summaries[0] ? `<p class="intake-captured">已填：${meetingEscape(summaries[0])}</p>` : ''}` : ''}
+        ${stepIndex === 0 && summaries[0] ? `<p class="intake-captured">已填：${meetingEscape(summaries[0])}</p>` : ''}
+        ${stepIndex === 1 ? `<p class="intake-captured">待补充：${step.missing.map(meetingEscape).join('；')}</p>
+          ${r.participants.length ? `<div class="attendee-preview">${renderAttendeeList(r)}</div>` : ''}` : ''}` : ''}
       <details class="meeting-intake-fields" id="meetingIntakeFields" data-step="${stepIndex}" ${isEditing || keepOpen ? 'open' : ''}>
         <summary>${isEditing ? '修改已确认信息' : '手动补充'}</summary>
         <div class="meeting-intake-body">
@@ -618,6 +690,7 @@ function readMeetingIntake(r) {
     if (value) r.facts[field] = value;
     else delete r.facts[field];
   }
+  if ($('noExternalAttendees')) r.facts.no_external_attendees = $('noExternalAttendees').checked;
   if (!$('mealRequired')) return;
   const meal = $('mealRequired').value;
   r.meal.required = meal ? meal === 'yes' : null;
@@ -679,7 +752,62 @@ async function downloadMeetingBundle(r, button) {
 function setAttendeeType() {
   const visitor = $('attendeeType').value === 'visitor';
   $('companyField').hidden = !visitor;
-  $('titleField').hidden = !visitor;
+  $('titleField').hidden = !visitor && $('saveMeetingAttendee').dataset.editIndex === undefined;
+}
+
+function editMeetingAttendee(person, index) {
+  const save = $('saveMeetingAttendee');
+  const editing = index !== undefined;
+  if (editing) save.dataset.editIndex = index;
+  else delete save.dataset.editIndex;
+  save.textContent = editing ? '保存人员' : '添加';
+  $('cancelMeetingAttendee').hidden = !editing;
+  $('attendeeType').value = person?.type === 'visitor' ? 'visitor' : 'sei';
+  $('attendeeName').value = person?.name || '';
+  $('attendeeCompany').value = person?.company || '';
+  $('attendeeTitle').value = person?.title_source ? '' : person?.title || '';
+  setAttendeeType();
+  $('attendeeName').focus();
+}
+
+async function saveMeetingAttendee(r, button) {
+  if (busy || button.disabled) return;
+  const session = active;
+  const index = button.dataset.editIndex;
+  const previous = r.participants[index];
+  const type = $('attendeeType').value;
+  const name = $('attendeeName').value.trim();
+  const company = type === 'visitor' ? $('attendeeCompany').value.trim() : '';
+  const title = $('titleField').hidden ? '' : $('attendeeTitle').value.trim();
+  if (!name) return $('attendeeName').focus();
+  const existing = previous || r.participants.find(person =>
+    person.type === type && person.name.replace(/\s/gu, '') === name.replace(/\s/gu, '')
+    && (person.company === company || !person.company || !company)
+  );
+  const entry = {type, company, name, title, english_name: existing?.name === name ? existing.english_name || '' : ''};
+  if (!previous && !title && existing?.title) {
+    entry.title = existing.title;
+    if (existing.title_source) entry.title_source = existing.title_source;
+  }
+  if (type === 'sei' && !entry.title) {
+    button.disabled = true;
+    try {
+      const {participants} = await request('/api/meeting/resolve-sei-titles', {names: [name]});
+      if (participants[0]?.title) Object.assign(entry, participants[0]);
+    } catch (_) {
+      // Save the name so the title can still be supplied manually.
+    } finally {
+      button.disabled = false;
+    }
+  }
+  if (active !== session || busy || !button.isConnected) return;
+  editingIntakeStep = 1;
+  updateMeetingIntake(r, list => {
+    if (type === 'visitor') r.facts.no_external_attendees = false;
+    const position = list.indexOf(existing);
+    if (position < 0) list.push(entry);
+    else list[position] = entry;
+  });
 }
 
 function initMeetingWorkflow() {
@@ -738,6 +866,8 @@ function initMeetingWorkflow() {
       makeMessage(d.language === 'zh' ? '桌签只需要中文。' : '桌签需要中英文两套。', 'user');
       persistMeetingRecord(r);
       runMeetingProduction();
+    } else if (d.editAttendee !== undefined) {
+      editMeetingAttendee(r.participants[Number(d.editAttendee)], d.editAttendee);
     } else if (d.removeAttendee !== undefined) {
       if (busy) return;
       editingIntakeStep = 1;
@@ -745,12 +875,8 @@ function initMeetingWorkflow() {
     } else if (d.useVisitor) {
       const visitor = meetingArray(VISITOR_KEY).find(entry => entry.key === d.useVisitor);
       if (!visitor) return;
-      $('attendeeType').value = 'visitor';
-      setAttendeeType();
-      $('attendeeCompany').value = visitor.company;
-      $('attendeeName').value = visitor.name;
-      $('attendeeTitle').value = visitor.title;
-      $('attendeeName').focus();
+      editMeetingAttendee({type: 'visitor', company: visitor.company, name: visitor.name});
+      $('attendeeTitle').focus();
     } else if (d.libraryReference) {
       const entry = meetingArray(MATERIAL_LIBRARY_KEY).find(item => item.meetingId === d.libraryReference && item.type === d.materialType);
       if (!entry?.versions?.length) return;
@@ -762,22 +888,9 @@ function initMeetingWorkflow() {
       persistMeetingRecord(r);
       renderMeetingWorkflow();
     } else if (d.meetingAction === 'add-attendee') {
-      const type = $('attendeeType').value;
-      const name = $('attendeeName').value.trim();
-      const company = type === 'visitor' ? $('attendeeCompany').value.trim() : '';
-      const title = type === 'visitor' ? $('attendeeTitle').value.trim() : '';
-      if (!name || (type === 'visitor' && (!company || !title))) {
-        alert(type === 'visitor' ? '请填写公司、姓名和职务。' : '请填写参会人姓名。');
-        return;
-      }
-      const prior = meetingArray(VISITOR_KEY).find(v => v.name === name && v.company === company);
-      if (busy) return;
-      editingIntakeStep = 1;
-      updateMeetingIntake(r, list => {
-        if (!list.some(p => p.type === type && p.name === name && p.company === company)) {
-          list.push({type, company, name, title, english_name: prior?.english_name || ''});
-        }
-      });
+      saveMeetingAttendee(r, button);
+    } else if (d.meetingAction === 'cancel-attendee') {
+      editMeetingAttendee();
     } else if (d.meetingAction === 'save-intake') {
       if (busy) return;
       editingIntakeStep = null;

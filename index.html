@@ -205,6 +205,9 @@ body{min-height:100vh;background:radial-gradient(ellipse at 84% 12%,#b9e0f1 0,tr
 .intake-current-heading {display:flex;align-items:center;gap:9px;font-size:14px}
 .intake-current p {margin:7px 0 0;color:#435772;font-size:13px;line-height:1.55}
 .intake-current .intake-captured {font-size:12px;color:#23587d}
+.intake-current:has(.meeting-intake-fields[open]) .attendee-preview {display:none}
+.attendee-review summary {cursor:pointer;color:#284f7f;font-size:12px;margin-top:5px}
+.attendee-review .attendee-list {margin-top:5px}
 .workspace[data-assistant="meeting"] .intake-current .meeting-intake-fields {border:0;margin-top:7px}
 .workspace[data-assistant="meeting"] .intake-current .meeting-intake-fields summary {padding:5px 0}
 .workspace[data-assistant="meeting"] .intake-current .meeting-intake-body {padding:6px 0 0}

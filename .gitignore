@@ -1,4 +1,5 @@
 .env
+.sei-directory.json
 .model-config/
 __pycache__/
 *.py[cod]

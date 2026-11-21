@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
-from meeting_workflow import INTAKE_TASK, MATERIALS, export_bundle, extract_meeting_basics, fields_missing, ordered_materials, seat_preview
+from meeting_workflow import INTAKE_TASK, MATERIALS, export_bundle, extract_meeting_basics, fields_missing, fill_sei_title, ordered_materials, seat_preview
 from model_config import ModelConfigError, ModelProfiles, request_model
 
 ROOT = Path(__file__).resolve().parent
@@ -65,7 +65,7 @@ def clean_memory_patch(value):
     if not isinstance(value,dict):return {"facts":[],"preferences":[]}
     return clean_shared_memory(value)
 
-def clean_meeting_profile(value):
+def clean_meeting_profile(value, *, resolve_titles=True):
     if not isinstance(value, dict):
         value = {}
     raw_facts = value.get("facts")
@@ -76,6 +76,8 @@ def clean_meeting_profile(value):
         if key in {"topic", "date", "time", "location", "attendee_count"}
         and ((isinstance(item, str) and item.strip()) or type(item) is int)
     }
+    if type(raw_facts.get("no_external_attendees")) is bool:
+        facts["no_external_attendees"] = raw_facts["no_external_attendees"]
     participants = []
     raw_people = value.get("participants")
     for person in raw_people[:100] if isinstance(raw_people, list) else []:
@@ -85,7 +87,9 @@ def clean_meeting_profile(value):
                 for field in ("company", "name", "title", "english_name")
             }
             participant["type"] = person.get("type") if person.get("type") in ("sei", "visitor") else ""
-            participants.append(participant)
+            if resolve_titles and participant["type"] == "sei" and person.get("title_source") in ("mock", "directory"):
+                participant["title_source"] = person["title_source"]
+            participants.append(fill_sei_title(participant) if resolve_titles else participant)
     meal = value.get("meal")
     meal = meal if isinstance(meal, dict) else {}
     required = meal.get("required") if type(meal.get("required")) is bool else None
@@ -100,6 +104,26 @@ def clean_meeting_profile(value):
 
 def clean_text(value, limit=18000):
     return value.strip()[:limit] if isinstance(value, str) else ""
+
+
+def resolve_chat_participants(people, previous, latest):
+    def compact(value):
+        return "".join(value.split())
+
+    supplied = compact(latest)
+    for person in people:
+        matches = [
+            old for old in previous
+            if old["type"] == person["type"] and compact(old["name"]) == compact(person["name"])
+            and (not old["company"] or not person["company"] or old["company"] == person["company"])
+        ]
+        prior = matches[0] if len(matches) == 1 else {}
+        if not person["title"] or compact(person["title"]) not in supplied:
+            person["title"] = prior.get("title", "")
+            if prior.get("title_source"):
+                person["title_source"] = prior["title_source"]
+        fill_sei_title(person)
+    return people
 
 
 def clean_materials(value):
@@ -273,6 +297,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(400, {"error": "请求内容必须是 JSON 对象"})
         if self.path == "/api/ai/models":
             return self.update_model_settings(data)
+        if self.path == "/api/meeting/resolve-sei-titles":
+            names = data.get("names")
+            if not isinstance(names, list):
+                return self.send_json(400, {"error": "请提供 SEI 人员姓名"})
+            people = [
+                fill_sei_title({"type": "sei", "name": name, "title": ""})
+                for item in names[:100] if (name := clean_text(item, 160))
+            ]
+            return self.send_json(200, {"participants": people})
         try:
             return self.handle_model_request(data)
         except ModelServiceError as error:
@@ -318,6 +351,7 @@ class Handler(BaseHTTPRequestHandler):
             "\n当前工作区：会务助手。仅处理本次指定的这一份会议材料。"
             "\n输出一个 JSON 对象，字段 content 是可直接审阅的纯文本正文。"
             "\n未提供的事实标为待确认，不擅自补造。历史会议的参考材料只用来参考结构和表述。"
+            "\n使用 title_source 为 mock 的职务时，在该职务后标注（模拟），不得将其表述为正式职务。"
         )
         source = {
             "材料": title, "要求": task, "本场会议": profile,
@@ -456,8 +490,10 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(handoff,str) and handoff.strip():system+="\n\n首页综合助手交接摘要（已由用户在本次沟通中提供）：\n"+handoff[:1800]
             meeting_memory=data.get("meeting_memory")
             meeting_day = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+            previous_participants = []
             if key=="meeting" and isinstance(meeting_memory,dict):
                 profile=clean_meeting_profile(meeting_memory.get("profile"))
+                previous_participants = profile["participants"]
                 try:
                     meeting_day = date.fromisoformat(clean_text(meeting_memory.get("today"), 10))
                 except ValueError:
@@ -489,10 +525,16 @@ class Handler(BaseHTTPRequestHandler):
                     result = {"meeting": {"facts": explicit_facts}, "reply": "已将能明确识别的会议基本信息填到右侧。其他内容暂未提取，您可继续补充或核对。"}
                 update = result.get("meeting")
                 update = update if isinstance(update, dict) else {}
-                profile = clean_meeting_profile(update)
+                profile = clean_meeting_profile(update, resolve_titles=False)
+                participants = None
+                if isinstance(update.get("participants"), list):
+                    participants = resolve_chat_participants(profile["participants"], previous_participants, latest)
+                if profile["facts"].get("no_external_attendees") is True:
+                    roster = previous_participants if participants is None else participants
+                    participants = [person for person in roster if person["type"] != "visitor"]
                 patch = {
                     "facts": {**profile["facts"], **explicit_facts},
-                    "participants": profile["participants"] if isinstance(update.get("participants"), list) else None,
+                    "participants": participants,
                     "meal": profile["meal"] if isinstance(update.get("meal"), dict) else None,
                     "action": update.get("action") if update.get("action") in ("start", "resume") else "",
                     "tent_language": update.get("tent_language") if update.get("tent_language") in ("zh", "zh-en") else "",

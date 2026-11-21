@@ -1,12 +1,29 @@
 """Meeting intake checks and the ordered material catalog."""
 from datetime import date, timedelta
+import json
+import os
+from pathlib import Path
 import re
 
 from meeting_export import pdf_document, word_document
 
+directory_override = Path(os.environ["SEI_DIRECTORY_FILE"]) if "SEI_DIRECTORY_FILE" in os.environ else Path(__file__).with_name(".sei-directory.json")
+directory_file = directory_override if directory_override.is_file() else Path(__file__).with_name("sei_directory.json")
+SEI_DIRECTORY = json.loads(directory_file.read_text(encoding="utf-8"))
+
+
+def fill_sei_title(person):
+    if person["type"] == "sei" and (not person["title"] or person.get("title_source") in ("mock", "directory")):
+        title = SEI_DIRECTORY["titles"].get("".join(person["name"].split()))
+        person["title"] = title or ""
+        person.pop("title_source", None)
+        if title:
+            person["title_source"] = "mock" if SEI_DIRECTORY["mock"] else "directory"
+    return person
+
 MATERIALS = {
     "handbook": ("会议手册", "整理会议信息、议程、组织分工与会务提示。未确认的议程和分工清楚标明待确认。"),
-    "roster": ("会议名单", "按主办方和外部参会方分组。逐一列出已确认人员，访客附公司和职务。"),
+    "roster": ("会议名单", "按主办方和外部参会方分组。逐一列出人员姓名和职务，外方另列公司。"),
     "notice": ("会议通知", "写成可审阅的会议通知，列明主题、时间、会议室、参会对象和已确认的要求。"),
     "seat_plan": ("会议座位图", ""),
     "table_tents": ("桌签", "为名单中的每位参会人制作独立桌签，逐人输出。有中文和英文两种版本要求时给出中文姓名及英文姓名，英文未提供时给出拼音建议并标明待核对。"),
@@ -14,10 +31,10 @@ MATERIALS = {
 }
 
 INTAKE_TASK = """收集本场会议资料，处理用户提出的修改。资料可按任意顺序提供。
-会议信息包括主题、日期、时间、会议室。参会人包括 SEI 人员姓名，以及外部人员的公司、姓名、职务。如果需要用餐，必须明确特殊需求；没有则记录“无”。没有提到的字段不得推断。每天的当前日期由应用提供，可据此解释相对日期。
+会议信息包括主题、日期、时间、会议室。第 2 步先核齐名单和职务：SEI 人员只需报姓名，应用自动查职务；用户本轮明确提供或更正职务时才填写其 title，否则沿用原档案中同一人的职务或留空等待查询。外方须记录用户提供的公司、姓名和职务；用户只给了部分资料时照实保存，未提供的留空，不得从共享记忆、旧会议或职位猜测中补齐。用户明确表示没有外方时，facts.no_external_attendees 返回 true，并从完整名单移除外方；有外方时返回 false，未提供此信息时省略。每次先核实双方姓名和职务，名单不齐时绝不要同时追问用餐。用户主动提供用餐信息时可先记录。需要用餐时记录明确的特殊需求；没有特殊需求则记录“无”。没有提到的字段不得推断。每天的当前日期由应用提供，可据此解释相对日期。
 仅分析用户明确表达的最新内容。facts 返回本轮新增或更正的字段。participants 未变化时返回 null，否则根据旧档案和最新指示返回合并后的完整当前名单，明确清空时返回空数组。未知的 type 留空。meal 未变化则返回 null。明确取消用餐须记录 false。已有资料齐备时，应用会自行发出制作确认。不得在这个接口生成材料、宣布制作完成或承诺已改好。
 用户要求改已有或排队的材料时，在 revision 中提供材料 key 和修改指示，等待应用处理；若只改会议基本资料，通过 facts、participants 或 meal 更新，勿重复提交 revision。用户明确同意开始或继续时 action 为 start 或 resume；用户咨询、犹豫或提出修改时留空。已经有人询问中文或中英桌签时，按用户清楚表态填 tent_language 为 zh 或 zh-en，其他时候留空。
-严格返回 JSON 对象：{"reply":"简短、得体的答复；资料不足时优先问一项","meeting":{"facts":{"topic":"主题","date":"YYYY-MM-DD","time":"HH:mm","location":"会议室","attendee_count":null},"participants":null,"meal":null,"action":"","tent_language":"","revision":null},"shared_memory_patch":{"facts":[],"preferences":[]}}。participants 的元素结构为 {"type":"sei|visitor|","company":"","name":"","title":"","english_name":""}。meal 的结构为 {"required":null,"special_diet":""}。revision 的结构为 {"key":"handbook|roster|notice|seat_plan|table_tents|dining_plan","instruction":"修改内容"}。只返回 JSON。"""
+严格返回 JSON 对象：{"reply":"简短、得体的答复；资料不足时优先问一项","meeting":{"facts":{"topic":"主题","date":"YYYY-MM-DD","time":"HH:mm","location":"会议室","attendee_count":null,"no_external_attendees":null},"participants":null,"meal":null,"action":"","tent_language":"","revision":null},"shared_memory_patch":{"facts":[],"preferences":[]}}。participants 的元素结构为 {"type":"sei|visitor|","company":"","name":"","title":"","english_name":""}。meal 的结构为 {"required":null,"special_diet":""}。revision 的结构为 {"key":"handbook|roster|notice|seat_plan|table_tents|dining_plan","instruction":"修改内容"}。只返回 JSON。"""
 
 
 def fields_missing(profile):
@@ -25,10 +42,13 @@ def fields_missing(profile):
     missing = [label for key, label in (
         ("topic", "会议主题"), ("date", "会议日期"), ("time", "会议时间"), ("location", "会议室")
     ) if not facts.get(key)]
-    if not attendees or any(
-        not person["name"] or person["type"] not in ("sei", "visitor")
-        or (person["type"] == "visitor" and (not person["company"] or not person["title"]))
-        for person in attendees
+    if (not any(person["type"] == "sei" for person in attendees)
+        or not (facts.get("no_external_attendees") is True or any(person["type"] == "visitor" for person in attendees))
+        or any(
+            not person["name"] or not person["title"] or person["type"] not in ("sei", "visitor")
+            or (person["type"] == "visitor" and not person["company"])
+            for person in attendees
+        )
     ):
         missing.append("完整参会名单")
     count = facts.get("attendee_count")
