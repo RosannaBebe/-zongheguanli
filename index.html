@@ -362,8 +362,9 @@ function setHomeConversationMode(enabled) {
 }
 
 function showReplyShortcuts(entry) {
-  if (typeof entry.showShortcuts === 'boolean') return entry.showShortcuts;
-  // Older saved replies do not include the model's display flag.
+  if (entry.routed) return false;
+  if (entry.showShortcuts === true) return true;
+  // Check the visible reply as well, including older entries without a display flag.
   const offersHelp = /会[务议].{0,40}政务|政务.{0,40}公文|公文.{0,40}知识|会务助手|政务信息助手|公文助手|综合知识库/u;
   const asksNextStep = /(?:您|接下来|眼下|目前).{0,25}(?:先|最想|希望|需要).{0,20}(?:处理|解决|办理|做|着手|支持|帮忙|梳理)|(?:有什么|哪件事|哪项工作|哪方面).{0,16}(?:办理|处理|优先|帮您|支持)/u;
   return offersHelp.test(entry.text) || asksNextStep.test(entry.text);
@@ -648,7 +649,7 @@ async function sendHomeMessage(entry, conversation) {
     const reply = result.reply || (target ? '我会在对应工作区继续为您办理。' : '您眼下最想先处理哪件事？我可以陪您一起梳理。');
     const response = {role: 'assistant', text: reply, at: new Date().toISOString()};
     if (!target && typeof result.show_shortcuts === 'boolean') response.showShortcuts = result.show_shortcuts;
-    if (target) response.showShortcuts = false;
+    if (target) response.routed = true;
     conversation.messages.splice(index + 1, 0, response);
     if (target) conversation.handoffSummary = homeHandoffSummary(conversation, result.handoff_summary);
     persistHomeConversation();
