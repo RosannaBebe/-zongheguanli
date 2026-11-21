@@ -1,6 +1,6 @@
 # 综智助手
 
-基于首页风格重构的轻量工作台，支持意图识别、会务/政务信息/公文/知识库四类助手、成果展示和本地历史对话。模型调用经 Python 服务端转发，浏览器和 GitHub 仓库都不会收到 API Key。
+基于首页风格重构的轻量工作台，支持意图识别、会务/政务信息/公文/知识库四类助手、成果展示和本地历史对话。模型调用经 Python 服务端转发，API Key 由服务端保存。
 
 ## 五位助手与记忆
 
@@ -36,7 +36,11 @@ GitHub 的 `main` 保存当前部署版本。每次发布前会在 `versions/` �
 3. 创建服务并等待部署完成。Render 会提供一个 `https://…onrender.com` 地址，打开即可使用。
 4. 如之后需要更换密钥，在 Render 服务的 **Environment** 中修改 `DEEPSEEK_API_KEY` 并重新部署。
 
-首页意图识别、四位专属助手的对话和会议匹配统一使用 DeepSeek 官方 API，模型为 `deepseek-flash`。已有 Render 服务也需要在 **Environment** 添加 `DEEPSEEK_API_KEY` 并重新部署。
+## 模型设置
+
+打开页面右上角的模型设置，可新增、修改、删除、启用或停用 OpenAI 兼容的 Chat Completions 模型。URL 填接口基础地址，例如 `https://api.deepseek.com/v1`。首页对话及分流、四个业务助手的对话、会议匹配与材料生成使用当前浏览器启用的同一个模型。切换从下一次请求起生效。环境变量中的 DeepSeek 配置作为首次打开时的默认项。
+
+自定义配置按浏览器保存到服务端 SQLite 文件，已保存的密钥不会回填到页面。部署后如需跨服务重启保留配置，请将 `MODEL_CONFIG_DB` 指向持久磁盘路径。公开部署的自定义接口使用可公开访问的 HTTPS 地址；本地访问支持本机 HTTP 模型接口。
 
 ## 本地运行
 
@@ -49,6 +53,7 @@ GitHub 的 `main` 保存当前部署版本。每次发布前会在 `versions/` �
 - `DEEPSEEK_BASE_URL`：默认 `https://api.deepseek.com/v1`
 - `DEEPSEEK_MODEL`：默认 `deepseek-flash`
 - `DEEPSEEK_API_KEY`：服务端 API Key
+- `MODEL_CONFIG_DB`：模型配置数据库路径，默认 `.model-config/profiles.sqlite3`
 - `PORT`：默认 `8765`
 
 `.env` 被 `.gitignore` 排除。部署平台只需配置 `DEEPSEEK_API_KEY`；请勿提交真实密钥。
@@ -56,6 +61,8 @@ GitHub 的 `main` 保存当前部署版本。每次发布前会在 `versions/` �
 ## 接口
 
 - `GET /api/ai/status`
+- `GET /api/ai/models`
+- `POST /api/ai/models`
 - `POST /api/ai/workbench-intent`
 - `POST /api/ai/chat`
 - `POST /api/meeting/match`

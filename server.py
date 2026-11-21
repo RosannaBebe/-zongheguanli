@@ -2,12 +2,16 @@
 # -*- coding: utf-8 -*-
 """Minimal same-origin web and OpenAI-compatible model service for 综智助手."""
 from __future__ import annotations
-import json, mimetypes, os, re, urllib.error, urllib.request
+import http.client, json, os, re, secrets, sqlite3
+from functools import cached_property
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 from meeting_workflow import INTAKE_TASK, MATERIALS, export_bundle, extract_meeting_basics, fields_missing, ordered_materials, seat_preview
+from model_config import ModelConfigError, ModelProfiles, request_model
 
 ROOT = Path(__file__).resolve().parent
 
@@ -23,6 +27,9 @@ load_dotenv()
 BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
 MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-flash")
 API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+MODEL_PROFILES = ModelProfiles(os.getenv("MODEL_CONFIG_DB", ROOT / ".model-config" / "profiles.sqlite3"), {
+    "id": "default", "url": BASE_URL, "model": MODEL, "api_key": API_KEY,
+})
 PORT=int(os.getenv("PORT","8765"))
 ASSISTANTS={"meeting":"会务助手","information":"政务信息助手","official_document":"公文助手","knowledge":"综合知识库"}
 BASE_PERSONA="【共同服务定位】你叫赛博小潘，是国企性质工程设计院综合管理部的综智助手。你在首页和会务、政务信息、公文、综合知识库四个工作区使用同一个身份，按当前工作区的任务要求办理。切换工作区时，说明你将在该业务工作区继续服务。历史对话中出现的旧称呼不改变当前身份。服务对象包括院领导和各级管理人员。无论用户的身份、职务或层级，一律按服务院领导的标准对待，将每位用户都视为院领导级服务对象。具有很强的服务意识：及时回应、积极承接、主动梳理、周到跟进；始终称呼“您”，语气谦逊温和、专业稳重，严禁使用“你”或命令、敷衍、怠慢的表达。准确领会指示，主动梳理安排、提醒缺项、复核关键信息，并优先交付可直接审阅或使用的成果。保持稳重、专业、响应及时，不夸大、不谄媚、不堆砌客套话，也不替领导擅自作决定。已确认事项持续沿用，用户最新明确意见优先。不得虚构事实、制度依据、来源或已执行的现实操作。对外以亲切、稳重的工作伙伴口吻交流，不冒充现实中的真人；日常交流不使用“智能体”或“AI助手”称呼自己。用户直接询问身份或所用模型时，应坦诚说明自己的岗位角色及实际模型名称，不回避、不编造。"
@@ -119,51 +126,47 @@ class ModelServiceError(RuntimeError):
     pass
 
 
-def llm(messages, max_tokens=1200, required_json_key=None):
-    if not API_KEY:
-        raise ModelServiceError("服务端未设置 DEEPSEEK_API_KEY")
+def llm(messages, profile, max_tokens=1200, required_json_key=None, *, allow_private=False):
+    if not profile:
+        raise ModelServiceError("请在模型设置中启用一个模型")
 
     request_messages = [dict(message) for message in messages]
     if request_messages and request_messages[0].get("role") == "system":
         request_messages[0]["content"] += (
-            "\n\n本次实际调用模型名称：" + MODEL + "。如果用户询问模型，请如实回答这个名称。"
+            "\n\n本次实际调用模型名称：" + profile["model"] + "。如果用户询问模型，请如实回答这个名称。"
         )
     payload = {
-        "model": MODEL,
+        "model": profile["model"],
         "messages": request_messages,
         "temperature": 0.3,
         "max_tokens": max_tokens,
-        "thinking": {"type": "disabled"},
-        "response_format": {"type": "json_object"},
     }
+    if urlsplit(profile["url"]).hostname == "api.deepseek.com":
+        payload["thinking"] = {"type": "disabled"}
+        payload["response_format"] = {"type": "json_object"}
     for attempt in range(2):
-        request = urllib.request.Request(
-            BASE_URL + "/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Authorization": "Bearer " + API_KEY, "Content-Type": "application/json"},
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(request, timeout=45) as response:
-                data = json.load(response)
+            status, data = request_model(profile["url"], profile["api_key"], payload,
+                                         allow_private=allow_private or profile.get("use_default_key", False))
+            if status != 200:
+                if attempt == 0 and status in (408, 500, 502, 503, 504):
+                    continue
+                reason = {
+                    401: "模型 API Key 无效", 402: "模型 API 余额不足",
+                    403: "当前 API Key 无权调用此模型", 429: "模型 API 请求过多，请稍后重试",
+                }.get(status, f"模型 API 返回 HTTP {status}")
+                raise ModelServiceError(reason)
             content = data["choices"][0]["message"]["content"]
             parsed = parse_json_object(content) if isinstance(content, str) else None
             if parsed is None or (required_json_key and not isinstance(parsed.get(required_json_key), dict)):
                 raise ValueError("invalid JSON content or required object missing")
             return content
-        except urllib.error.HTTPError as error:
-            if attempt == 0 and error.code in (408, 500, 502, 503, 504):
-                continue
-            reason = {
-                401: "DeepSeek API 密钥无效",
-                402: "DeepSeek API 余额不足",
-                429: "DeepSeek API 请求过多，请稍后重试",
-            }.get(error.code, f"DeepSeek API 返回 HTTP {error.code}")
-            raise ModelServiceError(reason) from None
-        except (OSError, TimeoutError):
+        except ModelConfigError as error:
+            raise ModelServiceError(str(error)) from None
+        except (OSError, http.client.HTTPException):
             if attempt == 0:
                 continue
-            raise ModelServiceError("暂时无法连接 DeepSeek API") from None
+            raise ModelServiceError("暂时无法连接模型 API") from None
         except (KeyError, IndexError, TypeError, ValueError):
             if attempt == 0:
                 request_messages[0]["content"] += (
@@ -179,14 +182,67 @@ def llm(messages, max_tokens=1200, required_json_key=None):
 class Handler(BaseHTTPRequestHandler):
     server_version="Zongzhi/1.0"
     def log_message(self,fmt,*args): print("%s - %s"%(self.address_string(),fmt%args))
-    def send_json(self,status,obj):
-        raw=json.dumps(obj,ensure_ascii=False).encode();self.send_response(status);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Content-Length",str(len(raw)));self.send_header("Cache-Control","no-store");self.end_headers();self.wfile.write(raw)
+    def send_json(self,status,obj,cookie=None):
+        raw=json.dumps(obj,ensure_ascii=False).encode()
+        self.send_response(status)
+        self.send_header("Content-Type","application/json; charset=utf-8")
+        self.send_header("Content-Length",str(len(raw)))
+        self.send_header("Cache-Control","no-store")
+        if cookie:
+            self.send_header("Set-Cookie",cookie)
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def browser_token(self):
+        cookies = SimpleCookie()
+        cookies.load(self.headers.get("Cookie", ""))
+        token = cookies.get("zongzhi_models")
+        return token.value if token and re.fullmatch(r"[a-zA-Z0-9_-]{43}", token.value) else None
+
+    @cached_property
+    def model_settings(self):
+        return MODEL_PROFILES.get(self.browser_token())
+
+    @cached_property
+    def active_model(self):
+        return MODEL_PROFILES.active(self.model_settings)
+
+    def is_local(self):
+        host = urlsplit("//" + self.headers.get("Host", "")).hostname
+        return (host in {"localhost", "127.0.0.1", "::1"}
+                and self.client_address[0] in {"127.0.0.1", "::1"})
+
+    def call_model(self, messages, max_tokens=1200, required_json_key=None):
+        return llm(messages, self.active_model, max_tokens, required_json_key, allow_private=self.is_local())
+
+    def update_model_settings(self, data):
+        origin = urlsplit(self.headers.get("Origin", ""))
+        local = self.is_local()
+        if (origin.netloc.lower() != self.headers.get("Host", "").lower()
+                or origin.scheme not in ({"http", "https"} if local else {"https"})):
+            return self.send_json(403, {"error": "请从当前网站打开模型设置"})
+        owner = self.browser_token() or secrets.token_urlsafe(32)
+        try:
+            settings = MODEL_PROFILES.update(owner, data, allow_private=local)
+        except ModelConfigError as error:
+            return self.send_json(400, {"error": str(error)})
+        except (OSError, sqlite3.Error):
+            return self.send_json(503, {"error": "暂时无法保存模型配置"})
+        cookie = f"zongzhi_models={owner}; Path=/api/; Max-Age=31536000; HttpOnly; SameSite=Strict"
+        if origin.scheme == "https":
+            cookie += "; Secure"
+        return self.send_json(200, settings, cookie=cookie)
     def read_json(self):
         n=int(self.headers.get("Content-Length","0"))
         if n>1_000_000: raise ValueError("请求内容过大")
         return json.loads(self.rfile.read(n) or b"{}")
     def do_GET(self):
-        if self.path=="/api/ai/status": return self.send_json(200,{"configured":bool(API_KEY),"model":MODEL,"fallback_models":[],"base_url":BASE_URL})
+        if self.path=="/api/ai/status":
+            model = self.active_model
+            return self.send_json(200, {"configured": bool(model), "model": model["model"] if model else "",
+                                        "base_url": model["url"] if model else "", "fallback_models": []})
+        if self.path=="/api/ai/models":
+            return self.send_json(200, MODEL_PROFILES.public(self.model_settings))
         if self.path == "/meeting.js":
             raw = (ROOT / "meeting.js").read_bytes()
             self.send_response(200)
@@ -206,10 +262,12 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc: return self.send_json(400,{"error":str(exc)})
         if not isinstance(data, dict):
             return self.send_json(400, {"error": "请求内容必须是 JSON 对象"})
+        if self.path == "/api/ai/models":
+            return self.update_model_settings(data)
         try:
             return self.handle_model_request(data)
         except ModelServiceError as error:
-            status = 502 if API_KEY else 503
+            status = 502 if self.active_model else 503
             return self.send_json(status, {"error": str(error)})
 
     def handle_material(self, data):
@@ -261,7 +319,7 @@ class Handler(BaseHTTPRequestHandler):
         }
         if revision:
             system += "\n请保留当前稿件未被要求修改的内容，只应用本轮修改意见。"
-        answer = llm([{"role": "system", "content": system}, {"role": "user", "content": json.dumps(source, ensure_ascii=False)}], 4800)
+        answer = self.call_model([{"role": "system", "content": system}, {"role": "user", "content": json.dumps(source, ensure_ascii=False)}], 4800)
         result = parse_json_object(answer) or {}
         content = clean_text(result.get("content"))
         if not content:
@@ -319,9 +377,9 @@ class Handler(BaseHTTPRequestHandler):
                 recent=item.get("messages",[]) if isinstance(item.get("messages"),list) else []
                 recent=[str(m)[:240] for m in recent[-8:] if isinstance(m,str)]
                 candidates.append({"id":str(item.get("id",""))[:100],"name":str(item.get("name",""))[:200],"title":str(item.get("title",""))[:200],"facts":facts,"recent_user_messages":recent})
-            if not candidates or not API_KEY:return self.send_json(200,{"match_id":None,"clarify":False})
+            if not candidates or not self.active_model:return self.send_json(200,{"match_id":None,"clarify":False})
             matcher="判断新需求是否是对已有会议的继续沟通。相同会议名称/主题/日期，即使参会人数、时间、地点等信息改变，也应匹配原会议；不得因人数变更而新建会议。若输入很笼统或无法确认是哪场会议，应要求用户从列表选择，返回clarify=true。若能确定是新会议，返回clarify=false且match_id=null。只能从候选列表中选择id，绝不编造id。只返回JSON：{\"match_id\":null或候选id,\"confidence\":0到1,\"clarify\":true或false}。候选数据："+json.dumps(candidates,ensure_ascii=False)
-            answer=llm([{"role":"system","content":matcher},{"role":"user","content":text}],180)
+            answer=self.call_model([{"role":"system","content":matcher},{"role":"user","content":text}],180)
             result=parse_json_object(answer) or {}
             match_id=result.get("match_id")
             confidence=result.get("confidence",0)
@@ -353,7 +411,7 @@ class Handler(BaseHTTPRequestHandler):
                 clean.append({"role": "user", "content": text})
             shared=clean_shared_memory(data.get("shared_memory"))
             system=BASE_PERSONA+"\n\n首页综合助手任务："+HOME_AGENT_TASK+"\n\n用户共享记忆（仅作背景参考，以用户当前明确表达为准）："+json.dumps(shared,ensure_ascii=False)[:2500]
-            answer=llm([{"role":"system","content":system}]+clean,500)
+            answer=self.call_model([{"role":"system","content":system}]+clean,500)
             result=parse_json_object(answer) or {}
             candidate=result.get("intent")
             try:confidence=float(result.get("confidence",0))
@@ -414,7 +472,7 @@ class Handler(BaseHTTPRequestHandler):
                 latest = next((item["content"] for item in reversed(clean) if item["role"] == "user"), "")
                 explicit_facts = extract_meeting_basics(latest, meeting_day)
                 try:
-                    reply = llm(model_messages, required_json_key="meeting")
+                    reply = self.call_model(model_messages, required_json_key="meeting")
                     result = parse_json_object(reply) or {}
                 except ModelServiceError:
                     if not explicit_facts:
@@ -440,7 +498,7 @@ class Handler(BaseHTTPRequestHandler):
                     "meeting": patch,
                     "shared_memory_patch": clean_memory_patch(result.get("shared_memory_patch")),
                 })
-            reply = llm(model_messages)
+            reply = self.call_model(model_messages)
             result=parse_json_object(reply) or {}
             text_reply=result.get("reply")
             if not isinstance(text_reply,str) or not text_reply.strip():text_reply=reply
