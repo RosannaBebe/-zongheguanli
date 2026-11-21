@@ -206,14 +206,21 @@ body{min-height:100vh;background:radial-gradient(ellipse at 84% 12%,#b9e0f1 0,tr
 .intake-current p {margin:7px 0 0;color:#435772;font-size:13px;line-height:1.55}
 .intake-current .intake-captured {font-size:12px;color:#23587d}
 .intake-current:has(.meeting-intake-fields[open]) .attendee-preview {display:none}
-.attendee-review summary {cursor:pointer;color:#284f7f;font-size:12px;margin-top:5px}
-.attendee-review .attendee-list {margin-top:5px}
 .workspace[data-assistant="meeting"] .intake-current .meeting-intake-fields {border:0;margin-top:7px}
 .workspace[data-assistant="meeting"] .intake-current .meeting-intake-fields summary {padding:5px 0}
 .workspace[data-assistant="meeting"] .intake-current .meeting-intake-body {padding:6px 0 0}
 .workspace[data-assistant="meeting"] .intake-check {background:#e5f3ec;border-color:#c1e1cf;color:#246546}
-.intake-edit {align-self:center;padding:4px 8px;font-weight:500}
+.intake-view {padding:4px 8px;font-weight:550;white-space:nowrap}
 .intake-confirmed-actions{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}
+.intake-review{grid-column:1/-1;margin:2px 0 4px;padding:14px 16px;border:1px solid #d1deed;border-radius:11px;background:#fff}
+.intake-review-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(135px,100%),1fr));gap:12px 16px;margin:0}
+.intake-review-fields dt{color:#49617b;font-size:12px}
+.intake-review-fields dd{margin:4px 0 0;font-size:13px;font-weight:550;overflow-wrap:anywhere;white-space:pre-wrap}
+.intake-review-actions{display:flex;align-items:center;gap:9px;margin-top:12px}
+.intake-save-status{font-size:12px;color:#21633f}
+.workspace[data-assistant="meeting"] .meeting-step-list .intake-review-error{margin:10px 0 0;color:#92331d;font-size:12px}
+.workspace[data-assistant="meeting"] .meeting-step-list .intake-review-count{margin:0 0 8px;font-size:12px}
+.intake-review .attendee-item{flex-wrap:wrap}
 .room-preview-button{padding:5px 10px;border-color:#a9c3df;color:#164b82;background:#edf5fd;font-weight:600;white-space:nowrap}
 .room-preview-button:hover{background:#dcecfb}
 .room-dialog{width:min(980px,calc(100% - 24px));max-height:min(92dvh,920px);padding:0;border:1px solid #c7d7e8;border-radius:18px;background:#fff;color:var(--ink);box-shadow:0 24px 65px #10243a45}
@@ -978,7 +985,23 @@ $('backHome').addEventListener('click', () => {
   showHomeWelcome();
   history.pushState({}, '', location.href.split('#')[0]);
 });
-$('chatForm').addEventListener('submit',e=>{e.preventDefault();const text=$('chatInput').value.trim();if(!text||busy)return;if(active?.assistant==='meeting'&&editingMeetingMaterial){$('meetingMaterialEditor').focus();return;}$('chatInput').value='';sendToAgent(text)});
+$('chatForm').addEventListener('submit', event => {
+  event.preventDefault();
+  const text = $('chatInput').value.trim();
+  if (!text || busy) return;
+  if (active?.assistant === 'meeting') {
+    if (intakeDraft) {
+      $('meetingIntakeEditor')?.querySelector('[data-meeting-action="save-intake-edit"]')?.focus();
+      return;
+    }
+    if (editingMeetingMaterial) {
+      $('meetingMaterialEditor').focus();
+      return;
+    }
+  }
+  $('chatInput').value = '';
+  sendToAgent(text);
+});
 $('chatInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();$('chatForm').requestSubmit()}});
 function renderHistory(){const list=$('historyList');list.replaceChildren();const items=readHistory().sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));$('historyEmpty').hidden=!!items.length;$('historyClear').disabled=!items.length;for(const item of items){const row=document.createElement('article');row.className='history-row';const open=document.createElement('button');open.className='history-open';open.type='button';const title=document.createElement('span');title.className='history-title';title.textContent=item.title||'新对话';const meta=document.createElement('span');meta.className='history-meta';meta.textContent=(item.assistant==='home'?'赛博小潘':(assistants[item.assistant]?.name||'综智助手'))+' · '+new Intl.DateTimeFormat('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}).format(new Date(item.updatedAt));open.append(title,meta);open.onclick=()=>{if(item.assistant==='home'){restoreHomeConversation(item);return}saveHistory();$('historyOverlay').hidden=true;startSession(item.assistant,'',item)};const del=document.createElement('button');del.className='button';del.type='button';del.textContent='删除';del.onclick=()=>{if(active?.id===item.id)active=null;if(homeConversation?.id===item.id)showHomeWelcome();localStorage.setItem(HISTORY_KEY,JSON.stringify(readHistory().filter(x=>x.id!==item.id)));renderHistory()};row.append(open,del);list.append(row)}}
 $('historyOpen').onclick=()=>{renderHistory();$('historyOverlay').hidden=false};$('historyClose').onclick=()=>$('historyOverlay').hidden=true;$('historyOverlay').onclick=e=>{if(e.target===$('historyOverlay'))$('historyOverlay').hidden=true};$('historyClear').onclick=()=>{active=null;showHomeWelcome();localStorage.removeItem(HISTORY_KEY);renderHistory()};$('memoryClear').onclick=()=>{localStorage.removeItem(SHARED_MEMORY_KEY);$('memoryClear').textContent='共享记忆已清除';setTimeout(()=>$('memoryClear').textContent='清除共享记忆',1400)};document.addEventListener('keydown',e=>{if(e.key==='Escape')$('historyOverlay').hidden=true});

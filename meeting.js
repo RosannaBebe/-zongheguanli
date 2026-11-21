@@ -13,7 +13,10 @@ const MATERIAL_LIBRARY_KEY = 'zongzhi.meeting-material-library.v1';
 let productionRun = null;
 let currentMaterialTab = '';
 let editingMeetingMaterial = '';
+let viewedIntakeStep = null;
 let editingIntakeStep = null;
+let intakeDraft = null;
+let savedIntakeStep = null;
 let meetingFeedback = '';
 
 function meetingEscape(value) {
@@ -149,7 +152,10 @@ function resetMeetingSessions() {
   pauseMeetingRun();
   currentMaterialTab = '';
   editingMeetingMaterial = '';
+  viewedIntakeStep = null;
   editingIntakeStep = null;
+  intakeDraft = null;
+  savedIntakeStep = null;
   meetingFeedback = '';
 }
 
@@ -219,7 +225,7 @@ function saveMeetingMaterial(r, key, content, mock = false) {
 
 async function runMeetingProduction(options = {}) {
   const r = getMeetingRecord();
-  if (!r || productionRun || busy || editingMeetingMaterial || !meetingReady(r)) return;
+  if (!r || productionRun || busy || editingMeetingMaterial || intakeDraft || !meetingReady(r)) return;
   if (!meetingNextMaterial(r)) return;
   retireWorkspaceRecovery();
   r.production.started = true;
@@ -386,7 +392,7 @@ async function reviseMeetingMaterial(r, revision, options = {}) {
 }
 
 async function sendMeetingMessage(text, options = {}) {
-  if (busy || editingMeetingMaterial) return;
+  if (busy || editingMeetingMaterial || intakeDraft) return;
   let session = active;
   let r = getMeetingRecord();
   retireWorkspaceRecovery();
@@ -486,7 +492,7 @@ async function sendMeetingMessage(text, options = {}) {
 
 function canRecoverMeetingModel(operation) {
   const r = getMeetingRecord();
-  if (!r || productionRun || editingMeetingMaterial) return false;
+  if (!r || productionRun || editingMeetingMaterial || intakeDraft) return false;
   if (operation.kind === 'material') return meetingReady(r) && meetingNextMaterial(r) === operation.key;
   if (operation.kind === 'revision') return meetingReady(r) && Boolean(r.materials[operation.revision.key]);
   return operation.kind === 'chat';
@@ -695,10 +701,24 @@ function renderIntakeFields(step, r) {
   </div>`;
 }
 
+function renderIntakeDetails(step, r) {
+  if (step === 1) {
+    const count = r.facts.attendee_count;
+    return `<p class="intake-review-count">${r.participants.length} 位参会人${count ? ` · 预计 ${meetingEscape(count)} 人` : ''}</p>
+      ${renderAttendeeList(r)}`;
+  }
+  const f = r.facts;
+  const fields = step === 0
+    ? [['会议主题', f.topic], ['会议室', f.location], ['会议日期', f.date], ['会议时间', f.time]]
+    : [['是否用餐', r.meal.required ? '用餐' : '不用餐'],
+      ...(r.meal.required ? [['特殊餐饮需求', r.meal.special_diet === '无' ? '无特殊要求' : r.meal.special_diet]] : [])];
+  return `<dl class="intake-review-fields">${fields.map(([label, value]) =>
+    `<div><dt>${label}</dt><dd>${meetingEscape(value)}</dd></div>`
+  ).join('')}</dl>`;
+}
+
 function renderMeetingIntake(r, steps, startAction, productionVisible) {
-  const next = steps.findIndex(step => step.missing.length > 0);
-  const stepIndex = editingIntakeStep ?? next;
-  const isEditing = editingIntakeStep !== null;
+  const stepIndex = steps.findIndex(step => step.missing.length > 0);
   const step = steps[stepIndex];
   const previousForm = $('meetingIntakeFields');
   const keepOpen = previousForm?.dataset.step === String(stepIndex) && previousForm.open;
@@ -716,40 +736,61 @@ function renderMeetingIntake(r, steps, startAction, productionVisible) {
     '请告诉我是否安排用餐。有特殊要求的话，也可以一起说明。',
   ];
   const confirmed = steps.map((item, index) => {
-    if (item.missing.length || (isEditing && index === stepIndex) || (index === 2 && steps[1].missing.length)) return '';
+    if (item.missing.length || (index === 2 && steps[1].missing.length)) return '';
+    const expanded = viewedIntakeStep === index;
+    const editing = editingIntakeStep === index;
+    const panelId = `intakeReview-${index}`;
     return `<li class="intake-confirmed">
       <span class="meeting-step-number intake-check" aria-label="已确认">✓</span>
-      <div><strong>${index + 1} · ${item.title}${r.mockSteps?.includes(index) ? ' · 模拟数据' : ''}</strong><p>${meetingEscape(summaries[index])}</p>
-        ${index === 1 ? `<details class="attendee-review"><summary>查看参会名单</summary>${renderAttendeeList(r)}</details>` : ''}
+      <div><strong id="intakeTitle-${index}">${index + 1} · ${item.title}${r.mockSteps?.includes(index) ? ' · 模拟数据' : ''}</strong>
+        <p>${meetingEscape(summaries[index])}</p>
       </div>
       <div class="intake-confirmed-actions">
-        ${index === 0 && f.location ? `<button type="button" class="workflow-btn room-preview-button" data-room-preview="true" aria-label="查看${meetingEscape(f.location)}会议室俯视示意图">查看会议室</button>` : ''}
-        <button type="button" class="workflow-btn intake-edit" data-intake-step="${index}" aria-label="修改${item.title}">修改</button>
+        ${index === 0 && f.location ? `<button type="button" class="workflow-btn room-preview-button" data-room-preview="true" aria-label="查看${meetingEscape(f.location)}的俯视示意图">查看会议室</button>` : ''}
+        <button type="button" class="workflow-btn intake-view" data-intake-view="${index}" data-step-title="${item.title}" aria-expanded="${expanded}"
+          aria-controls="${panelId}" aria-label="${expanded ? '收起' : '查看'}${item.title}" ${intakeDraft ? 'disabled' : ''}>${expanded ? '收起' : '查看'}</button>
+        <button type="button" class="workflow-btn intake-view" data-intake-step="${index}" data-intake-shortcut="${index}"
+          aria-label="修改${item.title}" ${expanded ? 'hidden' : ''} ${busy || intakeDraft || editingMeetingMaterial ? 'disabled' : ''}>修改</button>
       </div>
+      <section class="intake-review" id="${panelId}" aria-labelledby="intakeTitle-${index}" ${expanded ? '' : 'hidden'}>
+        ${editing ? `
+          <div id="meetingIntakeEditor">
+            ${renderIntakeFields(index, intakeDraft)}
+            <p class="intake-review-error" id="intakeEditError" role="alert" hidden></p>
+            <div class="workflow-actions">
+              <button type="button" class="workflow-btn primary" data-meeting-action="save-intake-edit">保存</button>
+              <button type="button" class="workflow-btn" data-meeting-action="cancel-intake-edit">取消</button>
+            </div>
+          </div>` : `
+          ${renderIntakeDetails(index, r)}
+          <div class="intake-review-actions">
+            <button type="button" class="workflow-btn" data-intake-step="${index}" aria-label="编辑${item.title}" ${busy || editingMeetingMaterial ? 'disabled' : ''}>编辑</button>
+            ${savedIntakeStep === index ? '<span role="status" class="intake-save-status">已保存</span>' : ''}
+          </div>`}
+      </section>
     </li>`;
   }).join('');
   return `<section class="workflow-card">
     <div class="meeting-section-head"><h3>会议信息收集</h3>
-      <span class="meeting-section-meta">${next < 0 ? '资料齐全' : '第 ' + (stepIndex + 1) + ' 步'}</span>
+      <span class="meeting-section-meta">${!step ? '资料齐全' : '第 ' + (stepIndex + 1) + ' 步'}</span>
     </div>
     ${confirmed ? `<ol class="meeting-step-list intake-confirmed-list" aria-label="已确认的信息">${confirmed}</ol>` : ''}
     ${step ? `<div class="intake-current">
       <div class="intake-current-heading"><span class="meeting-step-number">${stepIndex + 1}</span>
         <strong>${step.title}</strong></div>
-      ${!isEditing ? `<p>${prompts[stepIndex]}</p>
+      <p>${prompts[stepIndex]}</p>
         ${stepIndex === 0 && summaries[0] ? `<p class="intake-captured">已填：${meetingEscape(summaries[0])}</p>` : ''}
         ${stepIndex === 1 ? `<p class="intake-captured">待补充：${step.missing.map(meetingEscape).join('；')}</p>
-          ${r.participants.length ? `<div class="attendee-preview">${renderAttendeeList(r)}</div>` : ''}` : ''}` : ''}
-      <details class="meeting-intake-fields" id="meetingIntakeFields" data-step="${stepIndex}" ${isEditing || keepOpen ? 'open' : ''}>
-        <summary>${isEditing ? '修改已确认信息' : '手动补充'}</summary>
+          ${r.participants.length ? `<div class="attendee-preview">${renderAttendeeList(r)}</div>` : ''}` : ''}
+      ${intakeDraft ? '' : `<details class="meeting-intake-fields" id="meetingIntakeFields" data-step="${stepIndex}" ${keepOpen ? 'open' : ''}>
+        <summary>手动补充</summary>
         <div class="meeting-intake-body">
           ${renderIntakeFields(stepIndex, r)}
           <div class="workflow-actions">
             <button type="button" class="workflow-btn primary" data-meeting-action="save-intake">保存${step.title.replace('信息','')}</button>
-            ${isEditing ? '<button type="button" class="workflow-btn" data-meeting-action="cancel-intake-edit">返回当前步骤</button>' : ''}
           </div>
         </div>
-      </details>
+      </details>`}
     </div>` : !productionVisible ? `<div class="intake-ready" role="status">
       <p>会议信息已收齐。准备好后，可以开始制作材料。</p>
       ${startAction}
@@ -774,7 +815,7 @@ function renderMeetingWorkflow() {
   const visitorOpen = root.querySelector('.visitor-directory')?.open;
   const libraryQuery = $('meetingLibraryQuery')?.value;
   const libraryType = $('meetingLibraryType')?.value;
-  const disabled = busy || editing ? 'disabled' : '';
+  const disabled = busy || editing || intakeDraft ? 'disabled' : '';
   const needsLanguage = ready && r.production.started && r.production.tentAsked && next === 'table_tents' && !r.tentLanguage;
   const currentAction = ready && next && !productionRun && !needsLanguage
     ? `<button type="button" class="workflow-btn primary" data-meeting-action="start" ${disabled}>${r.production.started || r.production.needsResume ? '继续制作' : '开始制作'}</button>` : '';
@@ -811,7 +852,7 @@ function renderMeetingWorkflow() {
     ${completed.length ? `<section class="workflow-card">
       <h3>已完成材料</h3>
       <div class="material-tabs" role="tablist" aria-label="会议材料">${completed.map(([key, label]) =>
-        `<button type="button" class="material-tab ${selected === key ? 'active' : ''}" role="tab" aria-selected="${selected === key}" aria-controls="meetingMaterialPanel" data-material-tab="${key}" ${editing && selected !== key ? 'disabled' : ''}>${label}</button>`
+        `<button type="button" class="material-tab ${selected === key ? 'active' : ''}" role="tab" aria-selected="${selected === key}" aria-controls="meetingMaterialPanel" data-material-tab="${key}" ${intakeDraft || (editing && selected !== key) ? 'disabled' : ''}>${label}</button>`
       ).join('')}</div>
       <div id="meetingMaterialPanel" role="tabpanel" aria-label="${MATERIAL_TITLES[selected]}">
         ${selected === 'seat_plan' ? '<p class="workflow-hint">模拟座位图，供您预览和编辑。</p>' : ''}
@@ -819,7 +860,7 @@ function renderMeetingWorkflow() {
           : `<pre class="material-content">${meetingEscape(r.materials[selected])}</pre>`}
       </div>
       <div class="workflow-actions">
-        <button type="button" class="workflow-btn" data-edit-material="${selected}" ${busy ? 'disabled' : ''}>${editing ? '保存' : '编辑'}</button>
+        <button type="button" class="workflow-btn" data-edit-material="${selected}" ${busy || intakeDraft ? 'disabled' : ''}>${editing ? '保存' : '编辑'}</button>
         ${editing ? '<button type="button" class="workflow-btn" data-meeting-action="cancel-edit">取消</button>' : ''}
       </div>
       ${ready && !next && !editing && !busy ? `<div class="workflow-actions meeting-download">
@@ -857,12 +898,11 @@ function readMeetingIntake(r) {
   r.meal.special_diet = meal === 'yes' ? $('mealDiet').value.trim() : '';
 }
 
-function updateMeetingIntake(r, changeAttendees) {
+function updateMeetingIntake(r, applyChanges = readMeetingIntake) {
   if (busy) return;
   const wasRunning = pauseMeetingRun();
   const before = JSON.stringify([r.facts, r.participants, r.meal]);
-  readMeetingIntake(r);
-  if (changeAttendees) changeAttendees(r.participants);
+  applyChanges(r);
   const changed = changedMeetingFacts(r, before);
   if (changed || wasRunning) retireWorkspaceRecovery();
   persistMeetingRecord(r);
@@ -874,6 +914,92 @@ function updateMeetingIntake(r, changeAttendees) {
     askMeetingStart(r);
   }
   renderMeetingWorkflow();
+}
+
+function openIntakeEditor(r, step) {
+  if (busy || editingMeetingMaterial || intakeDraft || meetingIntake(r)[step].missing.length) return;
+  if (pauseMeetingRun()) {
+    r.production.needsResume = true;
+    persistMeetingRecord(r);
+    makeMessage('已暂停制作。保存会议资料后可继续。', 'assistant');
+  }
+  viewedIntakeStep = editingIntakeStep = step;
+  savedIntakeStep = null;
+  intakeDraft = structuredClone({facts: r.facts, participants: r.participants, meal: r.meal});
+  renderMeetingWorkflow();
+  $('meetingIntakeEditor').querySelector('input, select')?.focus({preventScroll: true});
+}
+
+function focusIntakeReviewEdit(step) {
+  $('intakeReview-' + step)?.querySelector('[data-intake-step]')?.focus({preventScroll: true});
+}
+
+function toggleIntakeReview(root, step) {
+  const previous = viewedIntakeStep;
+  viewedIntakeStep = previous === step ? null : step;
+  for (const index of new Set([previous, step])) {
+    if (index === null) continue;
+    const toggle = root.querySelector(`[data-intake-view="${index}"]`);
+    const panel = $('intakeReview-' + index);
+    if (!toggle || !panel) continue;
+    const expanded = viewedIntakeStep === index;
+    const label = expanded ? '收起' : '查看';
+    toggle.setAttribute('aria-expanded', String(expanded));
+    toggle.setAttribute('aria-label', label + toggle.dataset.stepTitle);
+    toggle.textContent = label;
+    panel.hidden = !expanded;
+    root.querySelector(`[data-intake-shortcut="${index}"]`).hidden = expanded;
+  }
+}
+
+function closeIntakeEditor() {
+  intakeDraft = null;
+  editingIntakeStep = null;
+}
+
+function saveIntakeEditor(r) {
+  if (busy || !intakeDraft) return;
+  const step = editingIntakeStep;
+  const draft = intakeDraft;
+  readMeetingIntake(draft);
+  const missing = meetingIntake(draft)[step].missing;
+  if (missing.length) {
+    const message = $('intakeEditError');
+    message.textContent = '请补齐后保存：' + missing.join('；');
+    message.hidden = false;
+    return;
+  }
+  closeIntakeEditor();
+  savedIntakeStep = step;
+  updateMeetingIntake(r, record => {
+    if (step === 0) {
+      for (const key of ['topic', 'location', 'date', 'time']) record.facts[key] = draft.facts[key];
+    } else if (step === 1) {
+      record.participants = draft.participants;
+      for (const key of ['attendee_count', 'no_external_attendees']) {
+        if (Object.hasOwn(draft.facts, key)) record.facts[key] = draft.facts[key];
+        else delete record.facts[key];
+      }
+    } else {
+      record.meal = draft.meal;
+    }
+  });
+  focusIntakeReviewEdit(step);
+}
+
+function changeMeetingAttendees(r, applyChanges, finishIntake = false) {
+  if (intakeDraft) {
+    readMeetingIntake(intakeDraft);
+    applyChanges(intakeDraft);
+    renderMeetingWorkflow();
+    if (finishIntake) saveIntakeEditor(r);
+    return;
+  }
+  updateMeetingIntake(r, record => {
+    readMeetingIntake(record);
+    applyChanges(record);
+    if (!meetingIntake(record)[1].missing.length) viewedIntakeStep = 1;
+  });
 }
 
 function refreshMeetingLibrary() {
@@ -931,17 +1057,18 @@ function editMeetingAttendee(person, index) {
   $('attendeeName').focus();
 }
 
-async function saveMeetingAttendee(r, button) {
+async function saveMeetingAttendee(r, button, finishIntake = false) {
   if (busy || button.disabled) return;
   const session = active;
+  const formRecord = intakeDraft || r;
   const index = button.dataset.editIndex;
-  const previous = r.participants[index];
+  const previous = formRecord.participants[index];
   const type = $('attendeeType').value;
   const name = $('attendeeName').value.trim();
   const company = type === 'visitor' ? $('attendeeCompany').value.trim() : '';
   const title = $('titleField').hidden ? '' : $('attendeeTitle').value.trim();
   if (!name) return $('attendeeName').focus();
-  const existing = previous || r.participants.find(person =>
+  const existing = previous || formRecord.participants.find(person =>
     person.type === type && person.name.replace(/\s/gu, '') === name.replace(/\s/gu, '')
     && (person.company === company || !person.company || !company)
   );
@@ -963,13 +1090,12 @@ async function saveMeetingAttendee(r, button) {
     }
   }
   if (active !== session || busy || !button.isConnected) return;
-  editingIntakeStep = 1;
-  updateMeetingIntake(r, list => {
-    if (type === 'visitor') r.facts.no_external_attendees = false;
-    const position = list.indexOf(existing);
-    if (position < 0) list.push(entry);
-    else list[position] = entry;
-  });
+  changeMeetingAttendees(r, record => {
+    if (type === 'visitor') record.facts.no_external_attendees = false;
+    const position = record.participants.indexOf(existing);
+    if (position < 0) record.participants.push(entry);
+    else record.participants[position] = entry;
+  }, finishIntake);
 }
 
 function initMeetingWorkflow() {
@@ -998,14 +1124,17 @@ function initMeetingWorkflow() {
       if (!room) return;
       $('meetingRoomDialogTitle').textContent = `${room} · 会议室俯视示意`;
       $('meetingRoomDialog').showModal();
+    } else if (d.intakeView !== undefined) {
+      if (intakeDraft) return;
+      toggleIntakeReview(root, Number(d.intakeView));
     } else if (d.intakeStep !== undefined) {
-      editingIntakeStep = Number(d.intakeStep);
-      renderMeetingWorkflow();
-      $('meetingIntakeFields')?.querySelector('summary').focus();
+      openIntakeEditor(r, Number(d.intakeStep));
     } else if (d.materialTab) {
+      if (intakeDraft) return;
       currentMaterialTab = d.materialTab;
       renderMeetingWorkflow();
     } else if (d.editMaterial) {
+      if (intakeDraft) return;
       if (editingMeetingMaterial) {
         const content = $('meetingMaterialEditor').value.trim();
         if (!content) return $('meetingMaterialEditor').focus();
@@ -1027,17 +1156,17 @@ function initMeetingWorkflow() {
       persistMeetingRecord(r);
       runMeetingProduction();
     } else if (d.editAttendee !== undefined) {
-      editMeetingAttendee(r.participants[Number(d.editAttendee)], d.editAttendee);
+      editMeetingAttendee((intakeDraft || r).participants[Number(d.editAttendee)], d.editAttendee);
     } else if (d.removeAttendee !== undefined) {
       if (busy) return;
-      editingIntakeStep = 1;
-      updateMeetingIntake(r, list => list.splice(Number(d.removeAttendee), 1));
+      changeMeetingAttendees(r, record => record.participants.splice(Number(d.removeAttendee), 1));
     } else if (d.useVisitor) {
       const visitor = meetingArray(VISITOR_KEY).find(entry => entry.key === d.useVisitor);
       if (!visitor) return;
       editMeetingAttendee({type: 'visitor', company: visitor.company, name: visitor.name});
       $('attendeeTitle').focus();
     } else if (d.libraryReference) {
+      if (intakeDraft) return;
       const entry = meetingArray(MATERIAL_LIBRARY_KEY).find(item => item.meetingId === d.libraryReference && item.type === d.materialType);
       if (!entry?.versions?.length) return;
       if (productionRun?.key === entry.type && pauseMeetingRun()) {
@@ -1053,12 +1182,21 @@ function initMeetingWorkflow() {
       editMeetingAttendee();
     } else if (d.meetingAction === 'save-intake') {
       if (busy) return;
-      editingIntakeStep = null;
       updateMeetingIntake(r);
+    } else if (d.meetingAction === 'save-intake-edit') {
+      const personButton = $('saveMeetingAttendee');
+      if (personButton && (personButton.dataset.editIndex !== undefined || $('attendeeName').value.trim())) {
+        saveMeetingAttendee(r, personButton, true);
+      } else {
+        saveIntakeEditor(r);
+      }
     } else if (d.meetingAction === 'cancel-intake-edit') {
-      editingIntakeStep = null;
+      const step = editingIntakeStep;
+      closeIntakeEditor();
       renderMeetingWorkflow();
+      focusIntakeReviewEdit(step);
     } else if (d.meetingAction === 'start') {
+      if (intakeDraft) return;
       makeMessage(r.production.started || r.production.needsResume ? '请继续制作。' : '请开始制作会议材料。', 'user');
       runMeetingProduction();
     } else if (d.meetingAction === 'pause') {
