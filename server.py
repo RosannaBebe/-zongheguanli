@@ -5,7 +5,9 @@ from __future__ import annotations
 import json, mimetypes, os, re, urllib.error, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from meeting_workflow import INTAKE_TASK, MATERIALS, export_bundle, fields_missing, ordered_materials, seat_preview
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+from meeting_workflow import INTAKE_TASK, MATERIALS, export_bundle, extract_meeting_basics, fields_missing, ordered_materials, seat_preview
 
 ROOT = Path(__file__).resolve().parent
 
@@ -65,8 +67,7 @@ def clean_meeting_profile(value):
         key: item.strip()[:250] if isinstance(item, str) else item
         for key, item in raw_facts.items()
         if key in {"topic", "date", "time", "location", "attendee_count"}
-        and (isinstance(item, str) or type(item) is int)
-        and item != ""
+        and ((isinstance(item, str) and item.strip()) or type(item) is int)
     }
     participants = []
     raw_people = value.get("participants")
@@ -118,7 +119,7 @@ class ModelServiceError(RuntimeError):
     pass
 
 
-def llm(messages, max_tokens=1200):
+def llm(messages, max_tokens=1200, required_json_key=None):
     if not API_KEY:
         raise ModelServiceError("服务端未设置 DEEPSEEK_API_KEY")
 
@@ -146,8 +147,9 @@ def llm(messages, max_tokens=1200):
             with urllib.request.urlopen(request, timeout=45) as response:
                 data = json.load(response)
             content = data["choices"][0]["message"]["content"]
-            if not isinstance(content, str) or not content.strip() or parse_json_object(content) is None:
-                raise ValueError("invalid JSON content")
+            parsed = parse_json_object(content) if isinstance(content, str) else None
+            if parsed is None or (required_json_key and not isinstance(parsed.get(required_json_key), dict)):
+                raise ValueError("invalid JSON content or required object missing")
             return content
         except urllib.error.HTTPError as error:
             if attempt == 0 and error.code in (408, 500, 502, 503, 504):
@@ -168,6 +170,8 @@ def llm(messages, max_tokens=1200):
                     "\n本次请直接返回包含所需字段的有效 JSON 对象。"
                     "JSON 必须完整且包含非空内容，无需 Markdown 代码围栏。"
                 )
+                if required_json_key:
+                    request_messages[0]["content"] += f"顶层必须有 {required_json_key} 对象。"
                 continue
             raise ModelServiceError("模型暂未返回有效回复，请重试") from None
 
@@ -280,7 +284,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def recover_meeting_basics(self, data):
+        recovered = {}
+        messages = data.get("messages")
+        for message in messages[-60:] if isinstance(messages, list) else []:
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            stamp = clean_text(message.get("at"), 40)
+            try:
+                at = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                day = at.astimezone(ZoneInfo("Asia/Shanghai")).date()
+            except ValueError:
+                # Without the original date, do not resolve relative dates from archived chats.
+                continue
+            recovered.update(extract_meeting_basics(clean_text(message.get("text"), 6000), day))
+        return self.send_json(200, {"facts": recovered})
+
     def handle_model_request(self, data):
+        if self.path == "/api/meeting/recover-basics":
+            return self.recover_meeting_basics(data)
         if self.path == "/api/meeting/material":
             return self.handle_material(data)
         if self.path == "/api/meeting/download":
@@ -347,20 +369,29 @@ class Handler(BaseHTTPRequestHandler):
             if key not in ASSISTANTS:return self.send_json(400,{"error":"助手类型无效"})
             if not isinstance(messages,list) or not messages:return self.send_json(400,{"error":"请先输入需求"})
             system=BASE_PERSONA+"\n\n当前工作区："+ASSISTANTS[key]+"。\n任务要求："+ASSISTANT_TASKS[key]
-            system+="\n\n输出要求：只输出JSON对象，字段为reply（自然、礼貌的中文回复）、artifact（可直接审阅的工作成果，没有独立成果时与reply相同）、shared_memory_patch（对象，包含facts与preferences两个字符串数组）。共享记忆只记录用户明确表达且对五位助手未来服务有复用价值的非敏感背景或偏好；不推断用户职务/身份，不记录密钥、证件、私人联系方式、完整文件内容等敏感信息。没有合适内容时数组留空。"
+            if key == "meeting":
+                system += "\n\n必须输出顶层 meeting 对象。凡用户明确提供的主题、日期、时间和会议室，全部填入 meeting.facts；仅在 reply 里复述不会保存资料。\n"
+            else:
+                system += "\n\n输出要求：只输出JSON对象，字段为reply（自然、礼貌的中文回复）、artifact（可直接审阅的工作成果，没有独立成果时与reply相同）、shared_memory_patch（对象，包含facts与preferences两个字符串数组）。\n"
+            system+="共享记忆只记录用户明确表达且对五位助手未来服务有复用价值的非敏感背景或偏好；不推断用户职务/身份，不记录密钥、证件、私人联系方式、完整文件内容等敏感信息。没有合适内容时数组留空。"
             shared=clean_shared_memory(data.get("shared_memory"))
             system+="\n\n用户共享记忆（供五位助手共同参考；最新明确表达优先）：\n"+json.dumps(shared,ensure_ascii=False)[:2500]
             handoff=data.get("home_handoff")
             if isinstance(handoff,str) and handoff.strip():system+="\n\n首页综合助手交接摘要（已由用户在本次沟通中提供）：\n"+handoff[:1800]
             meeting_memory=data.get("meeting_memory")
+            meeting_day = datetime.now(ZoneInfo("Asia/Shanghai")).date()
             if key=="meeting" and isinstance(meeting_memory,dict):
                 profile=clean_meeting_profile(meeting_memory.get("profile"))
+                try:
+                    meeting_day = date.fromisoformat(clean_text(meeting_memory.get("today"), 10))
+                except ValueError:
+                    pass
                 memory = {
                     **profile,
                     "phase": clean_text(meeting_memory.get("phase"), 100),
                     "current_material": clean_text(meeting_memory.get("current_material"), 50),
                     "completed_materials": list(clean_materials(meeting_memory.get("materials"))),
-                    "today": clean_text(meeting_memory.get("today"), 10),
+                    "today": meeting_day.isoformat(),
                 }
                 system += "\n\n本次会议档案，以最新明确指示为准：\n" + json.dumps(memory, ensure_ascii=False)
             clean=[]
@@ -369,14 +400,22 @@ class Handler(BaseHTTPRequestHandler):
                 role=m.get("role");content=m.get("text","")
                 if role in ("user","assistant") and isinstance(content,str):clean.append({"role":role,"content":content[:6000]})
             if not clean:return self.send_json(400,{"error":"对话内容为空"})
-            reply=llm([{"role":"system","content":system}]+clean)
+            model_messages = [{"role": "system", "content": system}] + clean
             if key == "meeting":
-                result = parse_json_object(reply) or {}
+                latest = next((item["content"] for item in reversed(clean) if item["role"] == "user"), "")
+                explicit_facts = extract_meeting_basics(latest, meeting_day)
+                try:
+                    reply = llm(model_messages, required_json_key="meeting")
+                    result = parse_json_object(reply) or {}
+                except ModelServiceError:
+                    if not explicit_facts:
+                        raise
+                    result = {"meeting": {"facts": explicit_facts}, "reply": "已将能明确识别的会议基本信息填到右侧。其他内容暂未提取，您可继续补充或核对。"}
                 update = result.get("meeting")
                 update = update if isinstance(update, dict) else {}
                 profile = clean_meeting_profile(update)
                 patch = {
-                    "facts": profile["facts"],
+                    "facts": {**profile["facts"], **explicit_facts},
                     "participants": profile["participants"] if isinstance(update.get("participants"), list) else None,
                     "meal": profile["meal"] if isinstance(update.get("meal"), dict) else None,
                     "action": update.get("action") if update.get("action") in ("start", "resume") else "",
@@ -392,6 +431,7 @@ class Handler(BaseHTTPRequestHandler):
                     "meeting": patch,
                     "shared_memory_patch": clean_memory_patch(result.get("shared_memory_patch")),
                 })
+            reply = llm(model_messages)
             result=parse_json_object(reply) or {}
             text_reply=result.get("reply")
             if not isinstance(text_reply,str) or not text_reply.strip():text_reply=reply
