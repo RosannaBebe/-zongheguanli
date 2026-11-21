@@ -277,6 +277,16 @@ body.pan-active .topbar{height:60px;padding:0 clamp(12px,3vw,28px);background:#f
 }
 .home.is-conversation .home-turn.assistant .message{border-color:#dce4ed;border-top-left-radius:4px;background:#fff;box-shadow:none}
 .home.is-conversation .home-turn.user .message{border-color:#cddcf0;border-top-right-radius:4px;background:#e4edfa}
+.pan-reply-shortcuts{display:flex;flex-wrap:wrap;gap:7px;max-width:100%;margin-top:3px}
+.pan-reply-shortcut{
+  display:inline-flex;align-items:center;gap:6px;min-height:36px;padding:6px 10px;
+  border:1px solid #cbd9e9;border-radius:9px;background:#fff;color:#294d77;
+  font-size:13px;font-weight:600;line-height:1.35;white-space:nowrap;
+}
+.pan-reply-shortcut:hover,.pan-reply-shortcut:focus-visible{background:#e7effb;border-color:#8eadd2}
+.pan-reply-shortcut:focus-visible{outline:2px solid #174f9c;outline-offset:2px}
+.pan-reply-shortcut .shortcut-icon{width:16px;height:16px;background:none}
+.pan-reply-shortcut svg{width:16px;height:16px}
 .home.is-conversation .home-model-error{justify-content:flex-end;padding:0;max-width:100%;flex-wrap:wrap}
 .home.is-conversation .home-model-error button{padding:4px 8px}
 .home.is-conversation .home-form{
@@ -351,10 +361,38 @@ function setHomeConversationMode(enabled) {
   $('homeInput').placeholder = enabled ? '继续和赛博小潘聊…' : '综合管理部竭诚为您服务';
 }
 
+function showReplyShortcuts(entry) {
+  if (typeof entry.showShortcuts === 'boolean') return entry.showShortcuts;
+  // Older saved replies do not include the model's display flag.
+  const offersHelp = /会[务议].{0,40}政务|政务.{0,40}公文|公文.{0,40}知识|会务助手|政务信息助手|公文助手|综合知识库/u;
+  const asksNextStep = /(?:您|接下来|眼下|目前).{0,25}(?:先|最想|希望|需要).{0,20}(?:处理|解决|办理|做|着手|支持|帮忙|梳理)|(?:有什么|哪件事|哪项工作|哪方面).{0,16}(?:办理|处理|优先|帮您|支持)/u;
+  return offersHelp.test(entry.text) || asksNextStep.test(entry.text);
+}
+
+function createReplyShortcuts(conversation, replyIndex) {
+  const group = document.createElement('div');
+  group.className = 'pan-reply-shortcuts';
+  group.setAttribute('role', 'group');
+  group.setAttribute('aria-label', '业务助手快捷入口');
+  for (const shortcut of homeShortcuts) {
+    const target = shortcut.dataset.assistant;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'pan-reply-shortcut';
+    button.append(shortcut.querySelector('.shortcut-icon').cloneNode(true), assistants[target].name);
+    button.addEventListener('click', () => {
+      const messages = conversation.messages.slice(0, replyIndex + 1);
+      startSession(target, '', null, {homeHandoff: homeHandoffSummary({messages})});
+    });
+    group.append(button);
+  }
+  return group;
+}
+
 function renderHomeTranscript(scroll = true) {
   const transcript = $('panTranscript');
   transcript.replaceChildren();
-  for (const entry of homeConversation?.messages || []) {
+  for (const [index, entry] of (homeConversation?.messages || []).entries()) {
     const role = entry.role;
     if (role !== 'user' && role !== 'assistant') continue;
     const row = document.createElement('div');
@@ -363,6 +401,9 @@ function renderHomeTranscript(scroll = true) {
     message.className = 'message ' + role;
     message.textContent = entry.text;
     row.append(message);
+    if (role === 'assistant' && showReplyShortcuts(entry)) {
+      row.append(createReplyShortcuts(homeConversation, index));
+    }
     if (role === 'user' && entry.failure) {
       const status = document.createElement('div');
       status.className = 'home-model-error';
@@ -605,7 +646,10 @@ async function sendHomeMessage(entry, conversation) {
     mergeSharedMemory(result.shared_memory_patch);
     const target = latest && Object.hasOwn(assistants, result.intent) ? result.intent : '';
     const reply = result.reply || (target ? '我会在对应工作区继续为您办理。' : '您眼下最想先处理哪件事？我可以陪您一起梳理。');
-    conversation.messages.splice(index + 1, 0, {role: 'assistant', text: reply, at: new Date().toISOString()});
+    const response = {role: 'assistant', text: reply, at: new Date().toISOString()};
+    if (!target && typeof result.show_shortcuts === 'boolean') response.showShortcuts = result.show_shortcuts;
+    if (target) response.showShortcuts = false;
+    conversation.messages.splice(index + 1, 0, response);
     if (target) conversation.handoffSummary = homeHandoffSummary(conversation, result.handoff_summary);
     persistHomeConversation();
     renderHomeTranscript(latest);
